@@ -1,0 +1,6 @@
+# Camera Displacement Analyzer - dependencies
+# Tested with Python 3.9 - 3.12 on macOS and Windows.
+
+opencv-contrib-python>=4.8,<5.0   # cv2 core + SIFT (contrib). Use this, not opencv-python.
+numpy>=1.23,<3.0
+matplotlib>=3.6,<4.0
