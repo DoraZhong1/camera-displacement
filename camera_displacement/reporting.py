@@ -1,10 +1,12 @@
-"""CSV export and graph generation."""
+"""CSV export, graph generation, and HTML report."""
 
 from __future__ import annotations
 
+import base64
 import csv
 import os
-from typing import List, Optional
+import webbrowser
+from typing import Dict, List, Optional, Tuple
 
 import matplotlib
 
@@ -187,3 +189,149 @@ def append_mm_to_csv(csv_path: str, ppm: float) -> None:
         writer = _csv.DictWriter(fh, fieldnames=new_cols)
         writer.writeheader()
         writer.writerows(rows)
+
+
+# ---------------------------------------------------------------------------
+# HTML report
+# ---------------------------------------------------------------------------
+
+def generate_html_report(
+    camera_results: List[Tuple[str, dict, str, Optional[str]]],
+    output_path: str,
+    video_name: str = "",
+    open_browser: bool = True,
+) -> str:
+    """Write a self-contained HTML summary report and optionally open it.
+
+    Parameters
+    ----------
+    camera_results:
+        List of ``(label, summary_dict, output_dir, annotated_video_path)``.
+        ``summary_dict`` is the dict returned by :func:`summarize`.
+    output_path:
+        Where to write the ``.html`` file.
+    video_name:
+        Source video filename shown in the report header.
+    open_browser:
+        If ``True``, open the report in the default browser after writing.
+    """
+
+    def _img_tag(png_path: str) -> str:
+        """Return an <img> tag with the PNG embedded as base64."""
+        if not os.path.isfile(png_path):
+            return ""
+        with open(png_path, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode()
+        return f'<img src="data:image/png;base64,{b64}" style="max-width:100%;border-radius:6px;">'
+
+    def _quality_badge(pct: int) -> str:
+        color = "#22c55e" if pct >= 80 else "#f59e0b" if pct >= 50 else "#ef4444"
+        return (
+            f'<span style="background:{color};color:#fff;padding:2px 10px;'
+            f'border-radius:12px;font-weight:600;font-size:0.9em;">{pct}%</span>'
+        )
+
+    camera_blocks = []
+    for label, s, out_dir, _ in camera_results:
+        peak_px = s.get("max_total_displacement_px", 0.0)
+        mean_px = s.get("mean_total_displacement_px", 0.0)
+        peak_frame = s.get("max_total_at_frame", 0)
+        peak_t = s.get("max_total_at_timestamp", 0.0)
+        ok = s.get("ok_frames", 0)
+        low = s.get("low_confidence_frames", 0)
+        lost = s.get("lost_frames", 0)
+        total = s.get("frames", 0)
+        quality_pct = int(100 * ok / total) if total else 0
+
+        # Collect graph images from the output dir.
+        graph_tags = ""
+        for fname in [
+            "absolute_total_displacement_vs_time.png",
+            "absolute_displacement_x_vs_time.png",
+            "absolute_displacement_y_vs_time.png",
+            "absolute_rotation_vs_time.png",
+            "absolute_confidence_vs_time.png",
+            "absolute_overview.png",
+        ]:
+            tag = _img_tag(os.path.join(out_dir, fname))
+            if tag:
+                graph_tags += f'<div style="margin-bottom:12px;">{tag}</div>\n'
+
+        graphs_section = (
+            f'<h3 style="margin-top:24px;">Graphs</h3>{graph_tags}'
+            if graph_tags
+            else '<p style="color:#6b7280;font-style:italic;">No graphs — rerun with <code>--graphs</code> to generate them.</p>'
+        )
+
+        camera_blocks.append(f"""
+        <div style="background:#1e293b;border-radius:12px;padding:24px;margin-bottom:28px;">
+          <h2 style="margin:0 0 16px;color:#f8fafc;font-size:1.3em;letter-spacing:0.03em;">
+            {label}
+          </h2>
+          <table style="border-collapse:collapse;width:100%;color:#e2e8f0;font-size:0.95em;">
+            <tr>
+              <td style="padding:6px 16px 6px 0;color:#94a3b8;">Peak displacement</td>
+              <td style="padding:6px 0;font-weight:600;color:#f8fafc;">{peak_px:.2f} px</td>
+              <td style="padding:6px 16px;color:#94a3b8;">at frame {peak_frame} ({peak_t:.2f} s)</td>
+            </tr>
+            <tr>
+              <td style="padding:6px 16px 6px 0;color:#94a3b8;">Mean displacement</td>
+              <td style="padding:6px 0;font-weight:600;color:#f8fafc;">{mean_px:.2f} px</td>
+              <td></td>
+            </tr>
+            <tr>
+              <td style="padding:6px 16px 6px 0;color:#94a3b8;">Tracking quality</td>
+              <td style="padding:6px 0;">{_quality_badge(quality_pct)}</td>
+              <td style="padding:6px 16px;color:#64748b;font-size:0.88em;">
+                {ok} OK &nbsp;/&nbsp; {low} low-conf &nbsp;/&nbsp; {lost} lost &nbsp;(of {total} frames)
+              </td>
+            </tr>
+          </table>
+          <div style="margin-top:16px;font-size:0.82em;color:#64748b;">
+            Output folder: <code style="color:#93c5fd;">{os.path.abspath(out_dir)}</code>
+          </div>
+          <div style="margin-top:20px;">{graphs_section}</div>
+        </div>
+        """)
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Camera Displacement Report</title>
+  <style>
+    body {{ margin:0; padding:32px; font-family:'Segoe UI',system-ui,sans-serif;
+           background:#0f172a; color:#e2e8f0; }}
+    h1   {{ font-size:1.6em; margin:0 0 4px; color:#f8fafc; }}
+    code {{ background:#1e293b; padding:1px 6px; border-radius:4px; font-size:0.9em; }}
+  </style>
+</head>
+<body>
+  <h1>Camera Displacement Report</h1>
+  <p style="color:#64748b;margin:0 0 28px;">
+    {"Source: <code>" + video_name + "</code>" if video_name else ""}
+  </p>
+  {"".join(camera_blocks)}
+</body>
+</html>"""
+
+    with open(output_path, "w", encoding="utf-8") as fh:
+        fh.write(html)
+
+    if open_browser:
+        abs_path = os.path.abspath(output_path)
+        # In WSL there is no Linux browser; convert to a Windows path and use explorer.exe.
+        import subprocess, shutil
+        if shutil.which("explorer.exe"):
+            try:
+                win_path = subprocess.check_output(
+                    ["wslpath", "-w", abs_path], text=True
+                ).strip()
+                subprocess.Popen(["explorer.exe", win_path],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception:
+                pass  # silently skip if conversion fails
+        else:
+            webbrowser.open(f"file://{abs_path}")
+
+    return output_path

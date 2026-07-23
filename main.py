@@ -18,14 +18,23 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+
+os.environ.setdefault("QT_LOGGING_RULES", "*.debug=false;qt.qpa.*=false")
 from typing import Optional, Tuple
+
+from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
+from rich import box as rich_box
 
 from camera_displacement.analyzer import AnalyzerConfig, DisplacementAnalyzer
 from camera_displacement.calibration import Calibration
 from camera_displacement.roi_selector import select_roi_interactive, validate_roi
 from camera_displacement.tracker import count_roi_features
 from camera_displacement.video_io import VideoError, VideoLoader, parse_layout
-from camera_displacement.reporting import append_mm_to_csv
+from camera_displacement.reporting import append_mm_to_csv, generate_html_report
+
+console = Console()
 
 ROI = Tuple[int, int, int, int]
 
@@ -145,30 +154,49 @@ def progress_bar(current: int, total: int) -> None:
 
 
 def _print_summary(outputs, calibration, label: str = "") -> None:
-    header = f"=== Displacement results{' — ' + label if label else ''} ==="
-    print(f"\n{header}")
     s = outputs.absolute_summary
-
     peak_px = s.get("max_total_displacement_px", 0.0)
     mean_px = s.get("mean_total_displacement_px", 0.0)
     peak_frame = s.get("max_total_at_frame", 0)
     peak_t = s.get("max_total_at_timestamp", 0.0)
-
-    print(f"  Peak displacement : {peak_px:.2f} px  "
-          f"(frame {peak_frame}, t={peak_t:.2f}s)")
-    print(f"  Mean displacement : {mean_px:.2f} px")
-
-    if calibration.is_calibrated:
-        print(f"  Peak displacement : {calibration.px_to_mm(peak_px):.3f} mm")
-        print(f"  Mean displacement : {calibration.px_to_mm(mean_px):.3f} mm")
-
     ok = s.get("ok_frames", 0)
     low = s.get("low_confidence_frames", 0)
     lost = s.get("lost_frames", 0)
     total = s.get("frames", 0)
     quality_pct = int(100 * ok / total) if total else 0
-    print(f"  Tracking quality  : {quality_pct}% reliable  "
-          f"({ok} OK / {low} low-confidence / {lost} lost  out of {total} frames)")
+
+    if quality_pct >= 80:
+        quality_color = "green"
+    elif quality_pct >= 50:
+        quality_color = "yellow"
+    else:
+        quality_color = "red"
+
+    table = Table(box=rich_box.SIMPLE, show_header=False, padding=(0, 2))
+    table.add_column("Key", style="dim", no_wrap=True)
+    table.add_column("Value", style="bold white")
+    table.add_column("Detail", style="dim")
+
+    table.add_row("Peak displacement",
+                  f"{peak_px:.2f} px",
+                  f"frame {peak_frame}  /  t = {peak_t:.2f} s")
+    table.add_row("Mean displacement", f"{mean_px:.2f} px", "")
+
+    if calibration.is_calibrated:
+        table.add_row("Peak displacement",
+                      f"{calibration.px_to_mm(peak_px):.3f} mm", "(calibrated)")
+        table.add_row("Mean displacement",
+                      f"{calibration.px_to_mm(mean_px):.3f} mm", "(calibrated)")
+
+    table.add_row(
+        "Tracking quality",
+        f"[{quality_color}]{quality_pct}% reliable[/{quality_color}]",
+        f"{ok} OK / {low} low-conf / {lost} lost  (of {total} frames)",
+    )
+
+    title = f"Results — {label}" if label else "Results"
+    console.print(Panel(table, title=f"[bold cyan]{title}[/bold cyan]",
+                        border_style="cyan", padding=(1, 2)))
 
 
 def _select_roi_with_retry(
@@ -198,33 +226,35 @@ def _select_roi_with_retry(
 def _prompt_mm_conversion(outputs_list, calibration) -> None:
     """Ask the user for a pixels-per-mm scale and add mm columns to all CSVs."""
     if calibration.is_calibrated:
-        return  # already have mm values
+        return
 
-    print("\n  Want to convert results to millimetres?")
-    print("  Enter the number of pixels that equal 1 mm in your video,")
-    print("  or press Enter to skip.")
+    console.print("\n[bold]Convert results to millimetres?[/bold]")
+    console.print("  Enter the number of pixels that equal [cyan]1 mm[/cyan] in your video,")
+    console.print("  or press [dim]Enter[/dim] to skip.")
     raw = input("  Pixels per mm: ").strip()
     if not raw:
-        print("  Skipping mm conversion.")
+        console.print("  [dim]Skipping mm conversion.[/dim]")
         return
     try:
         ppm = float(raw)
         if ppm <= 0:
             raise ValueError
     except ValueError:
-        print("  Invalid value — skipping mm conversion.", file=sys.stderr)
+        console.print("  [red]Invalid value — skipping mm conversion.[/red]")
         return
 
-    print(f"\n  Converting at {ppm} px/mm …")
+    console.print(f"\n  Converting at [cyan]{ppm}[/cyan] px/mm …")
     for label, outputs, _ in outputs_list:
         for csv_path in [outputs.absolute_csv, outputs.consecutive_csv]:
             append_mm_to_csv(csv_path, ppm)
-            print(f"    Updated: {csv_path}")
+            console.print(f"    [green]✓[/green] Updated: {csv_path}")
 
         s = outputs.absolute_summary
         peak_mm = s.get("max_total_displacement_px", 0.0) / ppm
         mean_mm = s.get("mean_total_displacement_px", 0.0) / ppm
-        print(f"  [{label}]  Peak = {peak_mm:.3f} mm   Mean = {mean_mm:.3f} mm")
+        console.print(f"  [bold]{label}[/bold]  "
+                      f"Peak = [bold white]{peak_mm:.3f} mm[/bold white]   "
+                      f"Mean = [bold white]{mean_mm:.3f} mm[/bold white]")
 
 
 def main(argv=None) -> int:
@@ -245,9 +275,9 @@ def main(argv=None) -> int:
         return 2
 
     info = loader.info
-    print(f"\nLoaded: {os.path.basename(video_path)}")
-    print(f"  {info.width}x{info.height} @ {info.fps:.2f} fps, "
-          f"~{info.frame_count} frames, {info.duration_seconds:.1f}s")
+    console.print(f"\n[bold green]Loaded:[/bold green] {os.path.basename(video_path)}")
+    console.print(f"  [dim]{info.width}x{info.height} @ {info.fps:.2f} fps, "
+                  f"~{info.frame_count} frames, {info.duration_seconds:.1f}s[/dim]")
 
     # 2. Baseline frame.
     baseline_index = args.baseline_frame
@@ -288,7 +318,7 @@ def main(argv=None) -> int:
         calibration = interactive_calibration()
     else:
         calibration = build_calibration(args, baseline)
-    print(f"  Calibration: {calibration.describe()}")
+    console.print(f"  [dim]Calibration: {calibration.describe()}[/dim]")
 
     # 5. Output folder + run.
     output_dir = args.output
@@ -310,22 +340,42 @@ def main(argv=None) -> int:
         progress=progress_bar,
     )
 
-    print("\nAnalyzing...")
+    console.print("\n[bold]Analyzing...[/bold]")
     try:
         outputs = DisplacementAnalyzer(config).run()
     except (ValueError, RuntimeError) as exc:
-        print(f"\nError during analysis: {exc}", file=sys.stderr)
+        console.print(f"\n[red]Error during analysis: {exc}[/red]")
         return 1
 
     _print_summary(outputs, calibration)
     _prompt_mm_conversion([("camera", outputs, output_dir)], calibration)
-    print("\nOutputs written to:", os.path.abspath(output_dir))
-    print(f"  CSV (absolute):    {outputs.absolute_csv}")
-    print(f"  CSV (consecutive): {outputs.consecutive_csv}")
+
+    # HTML report.
+    report_path = os.path.join(output_dir, "report.html")
+    generate_html_report(
+        [("Camera", outputs.absolute_summary, output_dir, outputs.annotated_video)],
+        report_path,
+        video_name=os.path.basename(video_path),
+    )
+
+    # Output file table.
+    out_table = Table(box=rich_box.SIMPLE, show_header=False, padding=(0, 2))
+    out_table.add_column("Type", style="dim", no_wrap=True)
+    out_table.add_column("Path", style="cyan")
+    out_table.add_row("CSV (absolute)", outputs.absolute_csv)
+    out_table.add_row("CSV (consecutive)", outputs.consecutive_csv)
     if outputs.absolute_plots or outputs.consecutive_plots:
-        print(f"  Graphs:            {len(outputs.absolute_plots) + len(outputs.consecutive_plots)} PNG files")
+        out_table.add_row(
+            "Graphs",
+            f"{len(outputs.absolute_plots) + len(outputs.consecutive_plots)} PNG files in {output_dir}/",
+        )
     if outputs.annotated_video:
-        print(f"  Annotated video:   {outputs.annotated_video}")
+        out_table.add_row("Annotated video", outputs.annotated_video)
+    out_table.add_row("HTML report", report_path)
+
+    console.print(Panel(out_table,
+                        title=f"[bold]Output files → {os.path.abspath(output_dir)}[/bold]",
+                        border_style="green", padding=(1, 2)))
     return 0
 
 
@@ -337,24 +387,23 @@ def _run_multi_camera(args, video_path, info, baseline, baseline_index) -> int:
         print(f"Error: {exc}", file=sys.stderr)
         return 2
 
-    print(f"\nMulti-camera mode: layout {args.layout}, "
-          f"{len(regions)} camera(s) to process.")
+    console.print(f"\n[bold]Multi-camera mode:[/bold] layout {args.layout}, "
+                  f"{len(regions)} camera(s) to process.")
 
     if args.roi:
-        print("Note: --roi is ignored in multi-camera mode. "
-              "ROI will be selected interactively for each camera.", file=sys.stderr)
+        console.print("[yellow]Note: --roi is ignored in multi-camera mode.[/yellow]")
 
     # Shared calibration (same for all cameras unless per-camera calibration is needed).
     calibration = build_calibration(args, baseline)
-    print(f"  Calibration: {calibration.describe()}")
+    console.print(f"  [dim]Calibration: {calibration.describe()}[/dim]")
 
     output_root = args.output
     all_outputs = []
 
     for region in regions:
         cam_label = f"camera_{region.camera_id}"
-        print(f"\n--- {cam_label} (crop x={region.x} y={region.y} "
-              f"w={region.width} h={region.height}) ---")
+        console.rule(f"[bold cyan]{cam_label}[/bold cyan]  "
+                     f"[dim](crop x={region.x} y={region.y} w={region.width} h={region.height})[/dim]")
 
         sub_baseline = region.crop(baseline)
 
@@ -367,7 +416,7 @@ def _run_multi_camera(args, video_path, info, baseline, baseline_index) -> int:
             min_features=args.min_inliers,
         )
         if roi is None:
-            print(f"  No ROI selected for {cam_label}; skipping.", file=sys.stderr)
+            console.print(f"  [yellow]No ROI selected for {cam_label}; skipping.[/yellow]")
             continue
         roi = validate_roi(roi, sub_baseline.shape)
         print(f"  ROI = {roi}")
@@ -390,33 +439,61 @@ def _run_multi_camera(args, video_path, info, baseline, baseline_index) -> int:
             camera_region=region.as_xywh(),
         )
 
-        print(f"  Analyzing {cam_label}...")
+        console.print(f"  [bold]Analyzing {cam_label}...[/bold]")
         try:
             outputs = DisplacementAnalyzer(config).run()
         except (ValueError, RuntimeError) as exc:
-            print(f"  Error analyzing {cam_label}: {exc}", file=sys.stderr)
+            console.print(f"  [red]Error analyzing {cam_label}: {exc}[/red]")
             continue
 
         _print_summary(outputs, calibration, label=cam_label)
-        print(f"  Outputs: {os.path.abspath(cam_output_dir)}")
         all_outputs.append((cam_label, outputs, cam_output_dir))
 
     if not all_outputs:
-        print("\nNo cameras were successfully analyzed.", file=sys.stderr)
+        console.print("\n[red]No cameras were successfully analyzed.[/red]")
         return 1
 
     _prompt_mm_conversion(all_outputs, calibration)
 
-    print(f"\n=== Done. Analyzed {len(all_outputs)}/{len(regions)} cameras. ===")
-    for cam_label, outputs, cam_dir in all_outputs:
-        print(f"\n  [{cam_label}]  {os.path.abspath(cam_dir)}")
-        print(f"    CSV (absolute):    {outputs.absolute_csv}")
-        print(f"    CSV (consecutive): {outputs.consecutive_csv}")
-        if outputs.absolute_plots or outputs.consecutive_plots:
-            print(f"    Graphs:            "
-                  f"{len(outputs.absolute_plots) + len(outputs.consecutive_plots)} PNG files")
-        if outputs.annotated_video:
-            print(f"    Annotated video:   {outputs.annotated_video}")
+    # HTML report (all cameras in one page).
+    report_path = os.path.join(args.output, "report.html")
+    generate_html_report(
+        [(label, outputs.absolute_summary, cam_dir, outputs.annotated_video)
+         for label, outputs, cam_dir in all_outputs],
+        report_path,
+        video_name=os.path.basename(video_path),
+    )
+
+    # Final summary table.
+    out_table = Table(box=rich_box.SIMPLE, show_header=True, padding=(0, 2))
+    out_table.add_column("Camera", style="bold cyan", no_wrap=True)
+    out_table.add_column("Peak (px)", justify="right")
+    out_table.add_column("Mean (px)", justify="right")
+    out_table.add_column("Quality", justify="right")
+    out_table.add_column("Output dir", style="dim")
+
+    for label, outputs, cam_dir in all_outputs:
+        s = outputs.absolute_summary
+        peak = s.get("max_total_displacement_px", 0.0)
+        mean = s.get("mean_total_displacement_px", 0.0)
+        total = s.get("frames", 0)
+        ok = s.get("ok_frames", 0)
+        quality_pct = int(100 * ok / total) if total else 0
+        qcolor = "green" if quality_pct >= 80 else "yellow" if quality_pct >= 50 else "red"
+        out_table.add_row(
+            label,
+            f"{peak:.2f}",
+            f"{mean:.2f}",
+            f"[{qcolor}]{quality_pct}%[/{qcolor}]",
+            cam_dir,
+        )
+
+    console.print(Panel(
+        out_table,
+        title=f"[bold]Done — {len(all_outputs)}/{len(regions)} cameras analyzed[/bold]",
+        border_style="green", padding=(1, 2),
+    ))
+    console.print(f"[bold green]HTML report:[/bold green] {os.path.abspath(report_path)}")
     return 0
 
 

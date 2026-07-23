@@ -4,3 +4,4 @@
 opencv-contrib-python>=4.8,<5.0   # cv2 core + SIFT (contrib). Use this, not opencv-python.
 numpy>=1.23,<3.0
 matplotlib>=3.6,<4.0
+rich>=13.0,<15.0                   # Pretty terminal output (panels, tables, progress bars).
