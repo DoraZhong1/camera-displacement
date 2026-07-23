@@ -2,5 +2,8 @@
 __pycache__/
 *.pyc
 output/
+out/
 *.mp4
+*.csv
+*.png
 !.gitkeep

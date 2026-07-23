@@ -8,6 +8,7 @@ Public entry points live in :mod:`camera_displacement.analyzer`.
 """
 
 from .analyzer import AnalyzerConfig, DisplacementAnalyzer
+from .video_io import CameraRegion, parse_layout
 
-__all__ = ["AnalyzerConfig", "DisplacementAnalyzer"]
+__all__ = ["AnalyzerConfig", "DisplacementAnalyzer", "CameraRegion", "parse_layout"]
 __version__ = "1.0.0"

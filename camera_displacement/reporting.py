@@ -138,5 +138,52 @@ def summarize(results: List[FrameResult]) -> dict:
         "lost_frames": lost,
         "max_total_displacement_px": max_r.total_displacement_pixels,
         "max_total_at_frame": max_r.frame_number,
+        "max_total_at_timestamp": max_r.timestamp_seconds,
         "mean_total_displacement_px": (sum(totals) / len(totals)) if totals else 0.0,
     }
+
+
+def append_mm_to_csv(csv_path: str, ppm: float) -> None:
+    """Read an existing displacement CSV and add ``*_mm`` columns in-place.
+
+    Skips files that already have mm columns (idempotent).
+    """
+    import csv as _csv
+
+    if ppm <= 0:
+        raise ValueError("pixels-per-mm must be > 0.")
+
+    with open(csv_path, newline="") as fh:
+        reader = _csv.DictReader(fh)
+        rows = list(reader)
+        existing_cols = list(reader.fieldnames or [])
+
+    if not rows:
+        return
+    if "displacement_x_mm" in existing_cols:
+        return  # already converted
+
+    px_mm_pairs = [
+        ("displacement_x_pixels", "displacement_x_mm"),
+        ("displacement_y_pixels", "displacement_y_mm"),
+        ("total_displacement_pixels", "total_displacement_mm"),
+    ]
+
+    # Build new column order: insert mm col right after each px col.
+    new_cols = list(existing_cols)
+    for px_col, mm_col in px_mm_pairs:
+        if px_col in new_cols:
+            new_cols.insert(new_cols.index(px_col) + 1, mm_col)
+
+    for row in rows:
+        for px_col, mm_col in px_mm_pairs:
+            if px_col in row:
+                try:
+                    row[mm_col] = round(float(row[px_col]) / ppm, 5)
+                except (ValueError, ZeroDivisionError):
+                    row[mm_col] = ""
+
+    with open(csv_path, "w", newline="") as fh:
+        writer = _csv.DictWriter(fh, fieldnames=new_cols)
+        writer.writeheader()
+        writer.writerows(rows)

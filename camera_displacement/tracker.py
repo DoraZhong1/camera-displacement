@@ -327,3 +327,22 @@ def _ratio_matched_pairs(matcher, desc1, desc2, ratio: float) -> List[cv2.DMatch
         if m.distance < ratio * n.distance:
             good.append(m)
     return good
+
+
+def count_roi_features(
+    frame: np.ndarray,
+    roi: ROI,
+    detector: str = "ORB",
+    max_features: int = 2000,
+) -> int:
+    """Return the number of features detected inside *roi* on *frame*.
+
+    Used to validate an ROI before committing to a full analysis run.
+    A count below ``~12`` (the default ``min_inliers``) means the selected
+    region is too plain / uniform and the user should choose a more textured area.
+    """
+    det, _ = _build_detector(detector, max_features)
+    gray = _to_gray(frame)
+    mask = roi_mask(frame.shape, roi)
+    kp, _ = det.detectAndCompute(gray, mask)
+    return len(kp) if kp else 0

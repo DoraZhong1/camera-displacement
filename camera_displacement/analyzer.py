@@ -31,7 +31,11 @@ class AnalyzerConfig:
     ratio_test: float = 0.75
     calibration: Calibration = field(default_factory=Calibration.none)
     write_annotated_video: bool = True
+    write_graphs: bool = False
     progress: Optional[Callable[[int, int], None]] = None  # (current, total)
+    # Optional crop applied to every frame before analysis.
+    # (x, y, w, h) in full-frame pixels; ROI coordinates are relative to the crop.
+    camera_region: Optional[ROI] = None
 
 
 @dataclass
@@ -63,6 +67,15 @@ class DisplacementAnalyzer:
                     f"Could not read baseline frame {cfg.baseline_frame_index} "
                     f"(video has ~{info.frame_count} frames)."
                 )
+
+            # Apply per-camera crop if this is one feed of a multi-camera composite.
+            if cfg.camera_region is not None:
+                cx, cy, cw, ch = cfg.camera_region
+                baseline = baseline[cy : cy + ch, cx : cx + cw]
+                frame_size = (cw, ch)
+            else:
+                frame_size = (info.width, info.height)
+
             roi = validate_roi(cfg.roi, baseline.shape)
 
             # Mode 2 (primary): absolute registration against the baseline.
@@ -85,7 +98,7 @@ class DisplacementAnalyzer:
                 annotator = AnnotatedVideoWriter(
                     annotated_path,
                     info.fps,
-                    (info.width, info.height),
+                    frame_size,
                     roi,
                     cfg.calibration,
                 )
@@ -95,6 +108,9 @@ class DisplacementAnalyzer:
 
             try:
                 for idx, frame in loader.frames(start=cfg.baseline_frame_index):
+                    if cfg.camera_region is not None:
+                        cx, cy, cw, ch = cfg.camera_region
+                        frame = frame[cy : cy + ch, cx : cx + cw]
                     ts = loader.timestamp(idx)
                     abs_res = baseline_tracker.process(frame, idx, ts)
                     con_res = consecutive_tracker.process(frame, idx, ts)
@@ -115,8 +131,11 @@ class DisplacementAnalyzer:
         write_csv(abs_results, abs_csv, cfg.calibration)
         write_csv(con_results, con_csv, cfg.calibration)
 
-        abs_plots = generate_plots(abs_results, cfg.output_dir, prefix="absolute_")
-        con_plots = generate_plots(con_results, cfg.output_dir, prefix="consecutive_")
+        if cfg.write_graphs:
+            abs_plots = generate_plots(abs_results, cfg.output_dir, prefix="absolute_")
+            con_plots = generate_plots(con_results, cfg.output_dir, prefix="consecutive_")
+        else:
+            abs_plots, con_plots = [], []
 
         return AnalyzerOutputs(
             absolute_csv=abs_csv,

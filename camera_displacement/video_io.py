@@ -2,13 +2,16 @@
 
 Thin wrapper around ``cv2.VideoCapture`` that exposes metadata (fps, size,
 frame count) and a simple frame iterator, with clear error handling.
+
+Also provides ``CameraRegion`` / ``parse_layout`` for videos that contain
+multiple camera feeds arranged in a regular grid (e.g. a 2×2 quad-view).
 """
 
 from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import Iterator, Optional, Tuple
+from typing import Iterator, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -16,6 +19,77 @@ import numpy as np
 
 class VideoError(RuntimeError):
     """Raised when a video cannot be opened or read."""
+
+
+# ---------------------------------------------------------------------------
+# Multi-camera grid support
+# ---------------------------------------------------------------------------
+
+@dataclass
+class CameraRegion:
+    """Pixel crop that defines one camera's sub-frame within a composite frame.
+
+    Coordinates are in full-frame pixels.  ``crop()`` extracts the sub-frame.
+    """
+
+    camera_id: int        # 0-based, filled left-to-right then top-to-bottom
+    x: int
+    y: int
+    width: int
+    height: int
+
+    def crop(self, frame: np.ndarray) -> np.ndarray:
+        """Return the portion of *frame* that corresponds to this camera."""
+        return frame[self.y : self.y + self.height, self.x : self.x + self.width]
+
+    def as_xywh(self) -> Tuple[int, int, int, int]:
+        return (self.x, self.y, self.width, self.height)
+
+
+def parse_layout(
+    layout_str: str,
+    frame_width: int,
+    frame_height: int,
+    num_cameras: Optional[int] = None,
+) -> List[CameraRegion]:
+    """Parse a ``'COLSxROWS'`` grid string into :class:`CameraRegion` objects.
+
+    Cameras are numbered left-to-right, top-to-bottom starting at 0.
+    *num_cameras* limits how many slots are returned (``None`` = all slots).
+
+    Example::
+
+        regions = parse_layout("2x2", 1080, 810, num_cameras=3)
+        # → 3 CameraRegions of size 540×405
+    """
+    parts = layout_str.lower().split("x")
+    if len(parts) != 2:
+        raise ValueError(
+            f"Invalid layout '{layout_str}'. Expected format 'COLSxROWS', e.g. '2x2'."
+        )
+    cols, rows = int(parts[0]), int(parts[1])
+    if cols < 1 or rows < 1:
+        raise ValueError("Layout columns and rows must both be >= 1.")
+
+    cell_w = frame_width // cols
+    cell_h = frame_height // rows
+    total_slots = cols * rows
+    limit = total_slots if num_cameras is None else min(num_cameras, total_slots)
+
+    regions: List[CameraRegion] = []
+    for cam_id in range(limit):
+        row_idx = cam_id // cols
+        col_idx = cam_id % cols
+        regions.append(
+            CameraRegion(
+                camera_id=cam_id,
+                x=col_idx * cell_w,
+                y=row_idx * cell_h,
+                width=cell_w,
+                height=cell_h,
+            )
+        )
+    return regions
 
 
 @dataclass
