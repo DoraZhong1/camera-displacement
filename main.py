@@ -19,7 +19,14 @@ import argparse
 import os
 import sys
 
+# Suppress Qt font/platform noise before any GUI library is imported.
 os.environ.setdefault("QT_LOGGING_RULES", "*.debug=false;qt.qpa.*=false")
+os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
+os.environ.setdefault("QT_QPA_FONTDIR", "/usr/share/fonts/truetype/dejavu")
+os.environ.setdefault("FONTCONFIG_PATH", "/etc/fonts")
+# Silence noisy fontconfig / Pango warnings from OpenCV on WSL.
+os.environ.setdefault("OPENCV_LOG_LEVEL", "ERROR")
+
 from typing import Optional, Tuple
 
 from rich.console import Console
@@ -199,6 +206,26 @@ def _print_summary(outputs, calibration, label: str = "") -> None:
                         border_style="cyan", padding=(1, 2)))
 
 
+def _open_plots_in_windows(png_paths: list) -> None:
+    """Open the first PNG in the list with the Windows default image viewer."""
+    import subprocess
+    if not png_paths:
+        return
+    # Only open the overview — explorer.exe handles spaces correctly and
+    # never misroutes to another app the way 'start ""' can.
+    path = png_paths[0]
+    try:
+        win_path = subprocess.check_output(
+            ["wslpath", "-w", os.path.abspath(path)], text=True
+        ).strip()
+        subprocess.Popen(
+            ["explorer.exe", win_path],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        pass
+
+
 def _select_roi_with_retry(
     frame,
     window_title: str = "Select reference object",
@@ -336,7 +363,7 @@ def main(argv=None) -> int:
         min_inlier_ratio=args.min_inlier_ratio,
         calibration=calibration,
         write_annotated_video=not args.no_video,
-        write_graphs=args.graphs,
+        write_graphs=True,
         progress=progress_bar,
     )
 
@@ -350,13 +377,20 @@ def main(argv=None) -> int:
     _print_summary(outputs, calibration)
     _prompt_mm_conversion([("camera", outputs, output_dir)], calibration)
 
-    # HTML report.
+    # HTML report (written but not auto-opened — use PNGs instead).
     report_path = os.path.join(output_dir, "report.html")
     generate_html_report(
         [("Camera", outputs.absolute_summary, output_dir, outputs.annotated_video)],
         report_path,
         video_name=os.path.basename(video_path),
+        open_browser=False,
     )
+
+    # Open the overview graph in Windows Photos.
+    overview = os.path.join(output_dir, "absolute_overview.png")
+    if os.path.isfile(overview):
+        console.print("\n[bold green]Opening overview graph…[/bold green]")
+        _open_plots_in_windows([overview])
 
     # Output file table.
     out_table = Table(box=rich_box.SIMPLE, show_header=False, padding=(0, 2))
@@ -434,7 +468,7 @@ def _run_multi_camera(args, video_path, info, baseline, baseline_index) -> int:
             min_inlier_ratio=args.min_inlier_ratio,
             calibration=calibration,
             write_annotated_video=not args.no_video,
-            write_graphs=args.graphs,
+            write_graphs=True,
             progress=progress_bar,
             camera_region=region.as_xywh(),
         )
@@ -462,6 +496,7 @@ def _run_multi_camera(args, video_path, info, baseline, baseline_index) -> int:
          for label, outputs, cam_dir in all_outputs],
         report_path,
         video_name=os.path.basename(video_path),
+        open_browser=False,
     )
 
     # Final summary table.
@@ -494,6 +529,16 @@ def _run_multi_camera(args, video_path, info, baseline, baseline_index) -> int:
         border_style="green", padding=(1, 2),
     ))
     console.print(f"[bold green]HTML report:[/bold green] {os.path.abspath(report_path)}")
+
+    # Open overview PNGs for each camera in Windows Photos.
+    all_overviews = [
+        os.path.join(cam_dir, "absolute_overview.png")
+        for _, _, cam_dir in all_outputs
+    ]
+    plots_to_open = [p for p in all_overviews if os.path.isfile(p)]
+    if plots_to_open:
+        console.print("\n[bold green]Opening graphs in Windows Photos…[/bold green]")
+        _open_plots_in_windows(plots_to_open)
     return 0
 
 

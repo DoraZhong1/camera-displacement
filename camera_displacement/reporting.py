@@ -74,51 +74,101 @@ def _series(results: List[FrameResult]):
     }
 
 
+_DARK_BG      = "#0f172a"
+_PANEL_BG     = "#1e293b"
+_GRID_COLOR   = "#334155"
+_TEXT_COLOR   = "#e2e8f0"
+_MUTED_COLOR  = "#64748b"
+_PALETTE = {
+    "dx":    "#38bdf8",   # sky blue
+    "dy":    "#fb923c",   # orange
+    "total": "#f43f5e",   # rose
+    "rot":   "#4ade80",   # green
+    "conf":  "#a78bfa",   # violet
+}
+
+
+def _apply_dark_theme(fig, axes_list):
+    """Apply a consistent dark theme to a figure and all its axes."""
+    fig.patch.set_facecolor(_DARK_BG)
+    for ax in axes_list:
+        ax.set_facecolor(_PANEL_BG)
+        ax.tick_params(colors=_MUTED_COLOR, which="both")
+        ax.xaxis.label.set_color(_MUTED_COLOR)
+        ax.yaxis.label.set_color(_MUTED_COLOR)
+        ax.title.set_color(_TEXT_COLOR)
+        for spine in ax.spines.values():
+            spine.set_edgecolor(_GRID_COLOR)
+        ax.grid(True, color=_GRID_COLOR, linewidth=0.7, linestyle="--", alpha=0.8)
+
+
 def generate_plots(results: List[FrameResult], out_dir: str, prefix: str = "") -> List[str]:
-    """Create the five required time-series graphs. Returns saved file paths."""
+    """Create styled time-series graphs. Returns saved file paths."""
     if not results:
         return []
     os.makedirs(out_dir, exist_ok=True)
     s = _series(results)
 
     specs = [
-        ("dx", "Horizontal displacement Δx (px)", "displacement_x_vs_time.png", "tab:blue"),
-        ("dy", "Vertical displacement Δy (px)", "displacement_y_vs_time.png", "tab:orange"),
-        ("total", "Total displacement (px)", "total_displacement_vs_time.png", "tab:red"),
-        ("rot", "Rotation (degrees)", "rotation_vs_time.png", "tab:green"),
-        ("conf", "Tracking confidence (0-1)", "confidence_vs_time.png", "tab:purple"),
+        ("dx",    "Horizontal Displacement  Δx (px)",  "displacement_x_vs_time.png"),
+        ("dy",    "Vertical Displacement  Δy (px)",    "displacement_y_vs_time.png"),
+        ("total", "Total Displacement  √(Δx²+Δy²)  (px)", "total_displacement_vs_time.png"),
+        ("rot",   "In-Plane Rotation of Camera (degrees)",  "rotation_vs_time.png"),
+        ("conf",  "Tracking Confidence",                "confidence_vs_time.png"),
     ]
 
     saved = []
-    for key, ylabel, fname, color in specs:
-        fig, ax = plt.subplots(figsize=(10, 4))
-        ax.plot(s["t"], s[key], color=color, linewidth=1.2)
-        ax.set_xlabel("Time (s)")
-        ax.set_ylabel(ylabel)
-        ax.set_title(ylabel + " vs time")
-        ax.grid(True, alpha=0.3)
+    for key, ylabel, fname in specs:
+        color = _PALETTE[key]
+        fig, ax = plt.subplots(figsize=(11, 3.8))
+        ax.fill_between(s["t"], s[key], alpha=0.15, color=color)
+        ax.plot(s["t"], s[key], color=color, linewidth=1.6)
+        ax.set_xlabel("Time (s)", fontsize=10)
+        ax.set_ylabel(ylabel, fontsize=10)
+        ax.set_title(ylabel + "  vs  Time", fontsize=12, fontweight="bold", pad=10)
         if key == "conf":
             ax.set_ylim(-0.02, 1.02)
-        fig.tight_layout()
+        _apply_dark_theme(fig, [ax])
+        fig.tight_layout(pad=1.8)
         path = os.path.join(out_dir, prefix + fname)
-        fig.savefig(path, dpi=120)
+        fig.savefig(path, dpi=140, facecolor=fig.get_facecolor())
         plt.close(fig)
         saved.append(path)
 
-    # Bonus combined overview.
-    fig, axes = plt.subplots(3, 1, figsize=(10, 9), sharex=True)
-    axes[0].plot(s["t"], s["dx"], label="Δx", color="tab:blue")
-    axes[0].plot(s["t"], s["dy"], label="Δy", color="tab:orange")
-    axes[0].set_ylabel("px"); axes[0].legend(); axes[0].grid(True, alpha=0.3)
-    axes[0].set_title("Camera displacement overview")
-    axes[1].plot(s["t"], s["total"], color="tab:red")
-    axes[1].set_ylabel("total px"); axes[1].grid(True, alpha=0.3)
-    axes[2].plot(s["t"], s["conf"], color="tab:purple")
-    axes[2].set_ylabel("confidence"); axes[2].set_xlabel("Time (s)")
-    axes[2].set_ylim(-0.02, 1.02); axes[2].grid(True, alpha=0.3)
-    fig.tight_layout()
+    # Overview dashboard (4 panels).
+    fig, axes = plt.subplots(4, 1, figsize=(12, 13), sharex=True)
+
+    axes[0].fill_between(s["t"], s["dx"], alpha=0.18, color=_PALETTE["dx"])
+    axes[0].fill_between(s["t"], s["dy"], alpha=0.18, color=_PALETTE["dy"])
+    axes[0].plot(s["t"], s["dx"], label="Δx", color=_PALETTE["dx"], linewidth=1.5)
+    axes[0].plot(s["t"], s["dy"], label="Δy", color=_PALETTE["dy"], linewidth=1.5)
+    axes[0].set_title("Camera Displacement Overview", fontsize=14, fontweight="bold", pad=12)
+    axes[0].set_ylabel("Displacement (px)", fontsize=10)
+    leg = axes[0].legend(frameon=True, fontsize=9)
+    leg.get_frame().set_facecolor(_PANEL_BG)
+    leg.get_frame().set_edgecolor(_GRID_COLOR)
+    for txt in leg.get_texts():
+        txt.set_color(_TEXT_COLOR)
+
+    axes[1].fill_between(s["t"], s["total"], alpha=0.18, color=_PALETTE["total"])
+    axes[1].plot(s["t"], s["total"], color=_PALETTE["total"], linewidth=1.5)
+    axes[1].set_ylabel("Total Displacement √(Δx²+Δy²) (px)", fontsize=10)
+
+    axes[2].fill_between(s["t"], s["rot"], alpha=0.18, color=_PALETTE["rot"])
+    axes[2].plot(s["t"], s["rot"], color=_PALETTE["rot"], linewidth=1.5)
+    axes[2].set_ylabel("In-Plane Rotation (°)", fontsize=10)
+
+    axes[3].fill_between(s["t"], s["conf"], alpha=0.18, color=_PALETTE["conf"])
+    axes[3].plot(s["t"], s["conf"], color=_PALETTE["conf"], linewidth=1.5)
+    axes[3].set_ylabel("Confidence", fontsize=10)
+    axes[3].set_xlabel("Time (s)", fontsize=10)
+    axes[3].set_ylim(-0.02, 1.02)
+
+    _apply_dark_theme(fig, axes)
+    fig.tight_layout(pad=2.0, h_pad=0.6)
+
     path = os.path.join(out_dir, prefix + "overview.png")
-    fig.savefig(path, dpi=120)
+    fig.savefig(path, dpi=140, facecolor=fig.get_facecolor())
     plt.close(fig)
     saved.append(path)
     return saved
@@ -218,100 +268,188 @@ def generate_html_report(
 
     def _img_tag(png_path: str) -> str:
         """Return an <img> tag with the PNG embedded as base64."""
-        if not os.path.isfile(png_path):
+        abs_png = os.path.abspath(png_path)
+        if not os.path.isfile(abs_png):
             return ""
-        with open(png_path, "rb") as f:
+        with open(abs_png, "rb") as f:
             b64 = base64.b64encode(f.read()).decode()
-        return f'<img src="data:image/png;base64,{b64}" style="max-width:100%;border-radius:6px;">'
+        return f'<img src="data:image/png;base64,{b64}" style="max-width:100%;border-radius:8px;display:block;">'
 
     def _quality_badge(pct: int) -> str:
-        color = "#22c55e" if pct >= 80 else "#f59e0b" if pct >= 50 else "#ef4444"
+        if pct >= 80:
+            color, bg = "#86efac", "#14532d"
+        elif pct >= 50:
+            color, bg = "#fde68a", "#78350f"
+        else:
+            color, bg = "#fca5a5", "#7f1d1d"
         return (
-            f'<span style="background:{color};color:#fff;padding:2px 10px;'
-            f'border-radius:12px;font-weight:600;font-size:0.9em;">{pct}%</span>'
+            f'<span style="background:{bg};color:{color};padding:3px 12px;'
+            f'border-radius:999px;font-weight:700;font-size:0.85em;letter-spacing:0.04em;">'
+            f'{pct}%</span>'
         )
+
+    def _stat_card(label: str, value: str, sub: str = "") -> str:
+        return f"""
+        <div style="background:#0f172a;border:1px solid #334155;border-radius:10px;
+                    padding:16px 20px;flex:1;min-width:160px;">
+          <div style="color:#64748b;font-size:0.78em;text-transform:uppercase;
+                      letter-spacing:0.08em;margin-bottom:6px;">{label}</div>
+          <div style="color:#f8fafc;font-size:1.4em;font-weight:700;line-height:1.2;">{value}</div>
+          {f'<div style="color:#64748b;font-size:0.8em;margin-top:4px;">{sub}</div>' if sub else ''}
+        </div>"""
 
     camera_blocks = []
     for label, s, out_dir, _ in camera_results:
-        peak_px = s.get("max_total_displacement_px", 0.0)
-        mean_px = s.get("mean_total_displacement_px", 0.0)
+        peak_px  = s.get("max_total_displacement_px", 0.0)
+        mean_px  = s.get("mean_total_displacement_px", 0.0)
         peak_frame = s.get("max_total_at_frame", 0)
-        peak_t = s.get("max_total_at_timestamp", 0.0)
-        ok = s.get("ok_frames", 0)
-        low = s.get("low_confidence_frames", 0)
-        lost = s.get("lost_frames", 0)
-        total = s.get("frames", 0)
+        peak_t   = s.get("max_total_at_timestamp", 0.0)
+        ok       = s.get("ok_frames", 0)
+        low      = s.get("low_confidence_frames", 0)
+        lost     = s.get("lost_frames", 0)
+        total    = s.get("frames", 0)
         quality_pct = int(100 * ok / total) if total else 0
 
-        # Collect graph images from the output dir.
-        graph_tags = ""
-        for fname in [
-            "absolute_total_displacement_vs_time.png",
-            "absolute_displacement_x_vs_time.png",
-            "absolute_displacement_y_vs_time.png",
-            "absolute_rotation_vs_time.png",
-            "absolute_confidence_vs_time.png",
-            "absolute_overview.png",
-        ]:
-            tag = _img_tag(os.path.join(out_dir, fname))
+        abs_out_dir = os.path.abspath(out_dir)
+
+        # ── Overview image (large, prominent) ─────────────────────────────
+        overview_tag = _img_tag(os.path.join(abs_out_dir, "absolute_overview.png"))
+
+        # ── Individual graph cards ─────────────────────────────────────────
+        individual_cards = ""
+        graph_specs = [
+            ("absolute_total_displacement_vs_time.png", "Total Displacement  √(Δx²+Δy²)"),
+            ("absolute_displacement_x_vs_time.png",     "Horizontal Displacement  Δx"),
+            ("absolute_displacement_y_vs_time.png",     "Vertical Displacement  Δy"),
+            ("absolute_rotation_vs_time.png",            "In-Plane Camera Rotation"),
+            ("absolute_confidence_vs_time.png",          "Confidence"),
+        ]
+        for fname, gtitle in graph_specs:
+            tag = _img_tag(os.path.join(abs_out_dir, fname))
             if tag:
-                graph_tags += f'<div style="margin-bottom:12px;">{tag}</div>\n'
+                individual_cards += f"""
+                <div style="background:#0f172a;border:1px solid #334155;border-radius:10px;
+                            padding:14px;margin-bottom:4px;">
+                  <div style="color:#94a3b8;font-size:0.78em;text-transform:uppercase;
+                              letter-spacing:0.07em;margin-bottom:10px;">{gtitle}</div>
+                  {tag}
+                </div>"""
 
         graphs_section = (
-            f'<h3 style="margin-top:24px;">Graphs</h3>{graph_tags}'
-            if graph_tags
-            else '<p style="color:#6b7280;font-style:italic;">No graphs — rerun with <code>--graphs</code> to generate them.</p>'
+            f"""
+            <div style="margin-top:28px;">
+              <h3 style="color:#94a3b8;font-size:0.82em;text-transform:uppercase;
+                         letter-spacing:0.1em;margin:0 0 16px;">Overview Dashboard</h3>
+              <div style="background:#0f172a;border:1px solid #334155;border-radius:10px;padding:16px;">
+                {overview_tag}
+              </div>
+            </div>
+            <div style="margin-top:24px;">
+              <h3 style="color:#94a3b8;font-size:0.82em;text-transform:uppercase;
+                         letter-spacing:0.1em;margin:0 0 16px;">Individual Channels</h3>
+              {individual_cards}
+            </div>"""
+            if overview_tag or individual_cards
+            else '<p style="color:#475569;font-style:italic;margin-top:20px;">No graphs found — check that the analysis ran successfully.</p>'
         )
 
+        stat_cards = "".join([
+            _stat_card("Peak Displacement", f"{peak_px:.2f} px", f"frame {peak_frame} &nbsp;/&nbsp; {peak_t:.2f} s"),
+            _stat_card("Mean Displacement", f"{mean_px:.2f} px"),
+            _stat_card("Tracking Quality", _quality_badge(quality_pct),
+                       f"{ok} OK &nbsp;·&nbsp; {low} low &nbsp;·&nbsp; {lost} lost &nbsp;/ {total}"),
+        ])
+
         camera_blocks.append(f"""
-        <div style="background:#1e293b;border-radius:12px;padding:24px;margin-bottom:28px;">
-          <h2 style="margin:0 0 16px;color:#f8fafc;font-size:1.3em;letter-spacing:0.03em;">
+        <section style="background:#1e293b;border:1px solid #334155;border-radius:14px;
+                        padding:28px 32px;margin-bottom:32px;">
+          <h2 style="margin:0 0 22px;color:#f8fafc;font-size:1.2em;font-weight:700;
+                     letter-spacing:0.04em;display:flex;align-items:center;gap:10px;">
+            <span style="display:inline-block;width:8px;height:8px;border-radius:50%;
+                         background:#38bdf8;"></span>
             {label}
           </h2>
-          <table style="border-collapse:collapse;width:100%;color:#e2e8f0;font-size:0.95em;">
-            <tr>
-              <td style="padding:6px 16px 6px 0;color:#94a3b8;">Peak displacement</td>
-              <td style="padding:6px 0;font-weight:600;color:#f8fafc;">{peak_px:.2f} px</td>
-              <td style="padding:6px 16px;color:#94a3b8;">at frame {peak_frame} ({peak_t:.2f} s)</td>
-            </tr>
-            <tr>
-              <td style="padding:6px 16px 6px 0;color:#94a3b8;">Mean displacement</td>
-              <td style="padding:6px 0;font-weight:600;color:#f8fafc;">{mean_px:.2f} px</td>
-              <td></td>
-            </tr>
-            <tr>
-              <td style="padding:6px 16px 6px 0;color:#94a3b8;">Tracking quality</td>
-              <td style="padding:6px 0;">{_quality_badge(quality_pct)}</td>
-              <td style="padding:6px 16px;color:#64748b;font-size:0.88em;">
-                {ok} OK &nbsp;/&nbsp; {low} low-conf &nbsp;/&nbsp; {lost} lost &nbsp;(of {total} frames)
-              </td>
-            </tr>
-          </table>
-          <div style="margin-top:16px;font-size:0.82em;color:#64748b;">
-            Output folder: <code style="color:#93c5fd;">{os.path.abspath(out_dir)}</code>
+          <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:8px;">
+            {stat_cards}
           </div>
-          <div style="margin-top:20px;">{graphs_section}</div>
-        </div>
+          <div style="margin-top:10px;font-size:0.78em;color:#475569;">
+            Output: <code style="color:#7dd3fc;background:#0f172a;padding:1px 6px;border-radius:4px;">{os.path.abspath(out_dir)}</code>
+          </div>
+          {graphs_section}
+        </section>
         """)
-
     html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Camera Displacement Report</title>
   <style>
-    body {{ margin:0; padding:32px; font-family:'Segoe UI',system-ui,sans-serif;
-           background:#0f172a; color:#e2e8f0; }}
-    h1   {{ font-size:1.6em; margin:0 0 4px; color:#f8fafc; }}
-    code {{ background:#1e293b; padding:1px 6px; border-radius:4px; font-size:0.9em; }}
+    *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
+    body {{
+      font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
+      background: #020817;
+      color: #e2e8f0;
+      min-height: 100vh;
+    }}
+    .topbar {{
+      background: #0f172a;
+      border-bottom: 1px solid #1e293b;
+      padding: 18px 40px;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      position: sticky;
+      top: 0;
+      z-index: 10;
+    }}
+    .topbar-dot {{
+      width: 10px; height: 10px; border-radius: 50%;
+      background: linear-gradient(135deg, #38bdf8, #818cf8);
+      flex-shrink: 0;
+    }}
+    .topbar h1 {{
+      font-size: 1.05em;
+      font-weight: 700;
+      color: #f8fafc;
+      letter-spacing: 0.02em;
+    }}
+    .topbar .sub {{
+      margin-left: auto;
+      font-size: 0.82em;
+      color: #475569;
+    }}
+    .topbar code {{
+      background: #1e293b;
+      color: #7dd3fc;
+      padding: 2px 8px;
+      border-radius: 5px;
+      font-size: 0.88em;
+    }}
+    .container {{
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 40px 24px 64px;
+    }}
+    code {{
+      background: #1e293b;
+      padding: 1px 6px;
+      border-radius: 4px;
+      font-size: 0.88em;
+      color: #7dd3fc;
+    }}
+    img {{ border-radius: 8px; }}
   </style>
 </head>
 <body>
-  <h1>Camera Displacement Report</h1>
-  <p style="color:#64748b;margin:0 0 28px;">
-    {"Source: <code>" + video_name + "</code>" if video_name else ""}
-  </p>
-  {"".join(camera_blocks)}
+  <div class="topbar">
+    <div class="topbar-dot"></div>
+    <h1>Camera Displacement Report</h1>
+    {"<span class='sub'>Source: <code>" + video_name + "</code></span>" if video_name else ""}
+  </div>
+  <div class="container">
+    {"".join(camera_blocks)}
+  </div>
 </body>
 </html>"""
 
@@ -320,9 +458,30 @@ def generate_html_report(
 
     if open_browser:
         abs_path = os.path.abspath(output_path)
-        # In WSL there is no Linux browser; convert to a Windows path and use explorer.exe.
+        # Copy to Windows Downloads so the user can open it easily.
         import subprocess, shutil
-        if shutil.which("explorer.exe"):
+        win_downloads = None
+        try:
+            win_downloads = subprocess.check_output(
+                ["wslpath", "-u", "C:\\Users\\smile\\Downloads"], text=True
+            ).strip()
+        except Exception:
+            pass
+        if win_downloads and os.path.isdir(win_downloads):
+            dest = os.path.join(win_downloads, os.path.basename(abs_path))
+            shutil.copy2(abs_path, dest)
+            print(f"\nReport copied to Downloads: C:\\Users\\smile\\Downloads\\{os.path.basename(abs_path)}")
+            try:
+                win_path = subprocess.check_output(
+                    ["wslpath", "-w", dest], text=True
+                ).strip()
+                subprocess.Popen(
+                    ["cmd.exe", "/c", "start", "", win_path],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
+            except Exception:
+                pass
+        elif shutil.which("explorer.exe"):
             try:
                 win_path = subprocess.check_output(
                     ["wslpath", "-w", abs_path], text=True
@@ -330,7 +489,7 @@ def generate_html_report(
                 subprocess.Popen(["explorer.exe", win_path],
                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             except Exception:
-                pass  # silently skip if conversion fails
+                pass
         else:
             webbrowser.open(f"file://{abs_path}")
 

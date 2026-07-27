@@ -31,7 +31,7 @@ class AnalyzerConfig:
     ratio_test: float = 0.75
     calibration: Calibration = field(default_factory=Calibration.none)
     write_annotated_video: bool = True
-    write_graphs: bool = False
+    write_graphs: bool = True
     progress: Optional[Callable[[int, int], None]] = None  # (current, total)
     # Optional crop applied to every frame before analysis.
     # (x, y, w, h) in full-frame pixels; ROI coordinates are relative to the crop.

@@ -3,8 +3,9 @@ venv/
 __pycache__/
 *.pyc
 output/
-out/
+out*/
 *.mp4
 *.csv
 *.png
+*.html
 !.gitkeep

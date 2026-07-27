@@ -8,6 +8,8 @@ an explicit ROI on the command line.
 
 from __future__ import annotations
 
+import os
+import sys
 from typing import Optional, Tuple
 
 import cv2
@@ -24,9 +26,27 @@ def select_roi_interactive(
     Returns ``(x, y, w, h)`` or ``None`` if the user cancelled (ESC) or drew
     an empty box.
     """
-    display = frame.copy()
+    # Scale the display frame so the window occupies at most ~55% of the screen.
+    h_orig, w_orig = frame.shape[:2]
+    try:
+        import tkinter as _tk
+        _root = _tk.Tk(); _root.withdraw()
+        screen_w, screen_h = _root.winfo_screenwidth(), _root.winfo_screenheight()
+        _root.destroy()
+    except Exception:
+        screen_w, screen_h = 1920, 1080
+    max_w = int(screen_w * 0.55)
+    max_h = int(screen_h * 0.55)
+    scale = min(max_w / max(w_orig, 1), max_h / max(h_orig, 1), 1.0)
+    if scale < 1.0:
+        display_small = cv2.resize(frame, (int(w_orig * scale), int(h_orig * scale)),
+                                   interpolation=cv2.INTER_AREA)
+    else:
+        display_small = frame.copy()
+        scale = 1.0
+
     cv2.putText(
-        display,
+        display_small,
         "Drag a box around the stationary reference object. ENTER=confirm, C=cancel",
         (10, 30),
         cv2.FONT_HERSHEY_SIMPLEX,
@@ -36,7 +56,20 @@ def select_roi_interactive(
         cv2.LINE_AA,
     )
     try:
-        x, y, w, h = cv2.selectROI(window_title, display, showCrosshair=True, fromCenter=False)
+        # Suppress Qt/fontconfig noise (QFontDatabase warnings etc.) that
+        # cannot be silenced via QT_LOGGING_RULES.
+        devnull_fd = os.open(os.devnull, os.O_WRONLY)
+        saved_stderr_fd = os.dup(2)
+        os.dup2(devnull_fd, 2)
+        os.close(devnull_fd)
+        try:
+            sx, sy, sw, sh = cv2.selectROI(window_title, display_small, showCrosshair=True, fromCenter=False)
+        finally:
+            os.dup2(saved_stderr_fd, 2)
+            os.close(saved_stderr_fd)
+        # Map coordinates back to original resolution.
+        x, y, w, h = (int(sx / scale), int(sy / scale),
+                      int(sw / scale), int(sh / scale))
     except cv2.error as exc:  # pragma: no cover - depends on GUI backend
         raise RuntimeError(
             "Interactive ROI selection is unavailable (no GUI backend). "
