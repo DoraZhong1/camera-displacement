@@ -75,31 +75,32 @@ def _series(results: List[FrameResult]):
 
 
 _DARK_BG      = "#0f172a"
-_PANEL_BG     = "#1e293b"
-_GRID_COLOR   = "#334155"
-_TEXT_COLOR   = "#e2e8f0"
-_MUTED_COLOR  = "#64748b"
+_DARK_BG      = "#f0f4f8"
+_PANEL_BG     = "#ffffff"
+_GRID_COLOR   = "#cbd5e1"
+_TEXT_COLOR   = "#0f172a"
+_MUTED_COLOR  = "#334155"
 _PALETTE = {
-    "dx":    "#38bdf8",   # sky blue
-    "dy":    "#fb923c",   # orange
-    "total": "#f43f5e",   # rose
-    "rot":   "#4ade80",   # green
-    "conf":  "#a78bfa",   # violet
+    "dx":    "#0284c7",   # blue
+    "dy":    "#ea580c",   # orange
+    "total": "#dc2626",   # red
+    "rot":   "#16a34a",   # green
+    "conf":  "#7c3aed",   # violet
 }
 
 
 def _apply_dark_theme(fig, axes_list):
-    """Apply a consistent dark theme to a figure and all its axes."""
+    """Apply a consistent light theme to a figure and all its axes."""
     fig.patch.set_facecolor(_DARK_BG)
     for ax in axes_list:
         ax.set_facecolor(_PANEL_BG)
-        ax.tick_params(colors=_MUTED_COLOR, which="both")
+        ax.tick_params(colors=_MUTED_COLOR, which="both", labelsize=9)
         ax.xaxis.label.set_color(_MUTED_COLOR)
         ax.yaxis.label.set_color(_MUTED_COLOR)
         ax.title.set_color(_TEXT_COLOR)
         for spine in ax.spines.values():
             spine.set_edgecolor(_GRID_COLOR)
-        ax.grid(True, color=_GRID_COLOR, linewidth=0.7, linestyle="--", alpha=0.8)
+        ax.grid(True, color=_GRID_COLOR, linewidth=0.8, linestyle="--", alpha=1.0)
 
 
 def generate_plots(results: List[FrameResult], out_dir: str, prefix: str = "") -> List[str]:
@@ -135,37 +136,55 @@ def generate_plots(results: List[FrameResult], out_dir: str, prefix: str = "") -
         plt.close(fig)
         saved.append(path)
 
-    # Overview dashboard (4 panels).
-    fig, axes = plt.subplots(4, 1, figsize=(12, 13), sharex=True)
+    # Overview dashboard (2x2 grid).
+    fig, axes = plt.subplots(2, 2, figsize=(16, 10))
+    ax_xy   = axes[0][0]
+    ax_tot  = axes[0][1]
+    ax_rot  = axes[1][0]
+    ax_conf = axes[1][1]
 
-    axes[0].fill_between(s["t"], s["dx"], alpha=0.18, color=_PALETTE["dx"])
-    axes[0].fill_between(s["t"], s["dy"], alpha=0.18, color=_PALETTE["dy"])
-    axes[0].plot(s["t"], s["dx"], label="Δx", color=_PALETTE["dx"], linewidth=1.5)
-    axes[0].plot(s["t"], s["dy"], label="Δy", color=_PALETTE["dy"], linewidth=1.5)
-    axes[0].set_title("Camera Displacement Overview", fontsize=14, fontweight="bold", pad=12)
-    axes[0].set_ylabel("Displacement (px)", fontsize=10)
-    leg = axes[0].legend(frameon=True, fontsize=9)
+    fig.suptitle("Camera Displacement Overview", fontsize=15, fontweight="bold",
+                 color=_TEXT_COLOR, y=0.98)
+
+    # Top-left: Δx and Δy
+    ax_xy.fill_between(s["t"], s["dx"], alpha=0.18, color=_PALETTE["dx"])
+    ax_xy.fill_between(s["t"], s["dy"], alpha=0.18, color=_PALETTE["dy"])
+    ax_xy.plot(s["t"], s["dx"], label="Δx (horizontal)", color=_PALETTE["dx"], linewidth=1.5)
+    ax_xy.plot(s["t"], s["dy"], label="Δy (vertical)",   color=_PALETTE["dy"], linewidth=1.5)
+    ax_xy.set_title("Horizontal & Vertical Displacement", fontsize=11, fontweight="bold")
+    ax_xy.set_ylabel("Displacement (px)", fontsize=10)
+    ax_xy.set_xlabel("Time (s)", fontsize=10)
+    leg = ax_xy.legend(frameon=True, fontsize=9)
     leg.get_frame().set_facecolor(_PANEL_BG)
     leg.get_frame().set_edgecolor(_GRID_COLOR)
     for txt in leg.get_texts():
         txt.set_color(_TEXT_COLOR)
 
-    axes[1].fill_between(s["t"], s["total"], alpha=0.18, color=_PALETTE["total"])
-    axes[1].plot(s["t"], s["total"], color=_PALETTE["total"], linewidth=1.5)
-    axes[1].set_ylabel("Total Displacement √(Δx²+Δy²) (px)", fontsize=10)
+    # Top-right: total displacement
+    ax_tot.fill_between(s["t"], s["total"], alpha=0.18, color=_PALETTE["total"])
+    ax_tot.plot(s["t"], s["total"], color=_PALETTE["total"], linewidth=1.5)
+    ax_tot.set_title("Total Displacement  √(Δx²+Δy²)", fontsize=11, fontweight="bold")
+    ax_tot.set_ylabel("Displacement (px)", fontsize=10)
+    ax_tot.set_xlabel("Time (s)", fontsize=10)
 
-    axes[2].fill_between(s["t"], s["rot"], alpha=0.18, color=_PALETTE["rot"])
-    axes[2].plot(s["t"], s["rot"], color=_PALETTE["rot"], linewidth=1.5)
-    axes[2].set_ylabel("In-Plane Rotation (°)", fontsize=10)
+    # Bottom-left: rotation
+    ax_rot.fill_between(s["t"], s["rot"], alpha=0.18, color=_PALETTE["rot"])
+    ax_rot.plot(s["t"], s["rot"], color=_PALETTE["rot"], linewidth=1.5)
+    ax_rot.set_title("In-Plane Camera Rotation", fontsize=11, fontweight="bold")
+    ax_rot.set_ylabel("Rotation (°)", fontsize=10)
+    ax_rot.set_xlabel("Time (s)", fontsize=10)
 
-    axes[3].fill_between(s["t"], s["conf"], alpha=0.18, color=_PALETTE["conf"])
-    axes[3].plot(s["t"], s["conf"], color=_PALETTE["conf"], linewidth=1.5)
-    axes[3].set_ylabel("Confidence", fontsize=10)
-    axes[3].set_xlabel("Time (s)", fontsize=10)
-    axes[3].set_ylim(-0.02, 1.02)
+    # Bottom-right: confidence
+    ax_conf.fill_between(s["t"], s["conf"], alpha=0.18, color=_PALETTE["conf"])
+    ax_conf.plot(s["t"], s["conf"], color=_PALETTE["conf"], linewidth=1.5)
+    ax_conf.set_title("Tracking Confidence", fontsize=11, fontweight="bold")
+    ax_conf.set_ylabel("Confidence (0–1)", fontsize=10)
+    ax_conf.set_xlabel("Time (s)", fontsize=10)
+    ax_conf.set_ylim(-0.02, 1.02)
 
-    _apply_dark_theme(fig, axes)
-    fig.tight_layout(pad=2.0, h_pad=0.6)
+    _apply_dark_theme(fig, [ax_xy, ax_tot, ax_rot, ax_conf])
+    fig.tight_layout(pad=2.0, w_pad=3.0, h_pad=3.0)
+    fig.subplots_adjust(top=0.92)
 
     path = os.path.join(out_dir, prefix + "overview.png")
     fig.savefig(path, dpi=140, facecolor=fig.get_facecolor())
