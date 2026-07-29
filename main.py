@@ -39,7 +39,15 @@ from camera_displacement.calibration import Calibration
 from camera_displacement.roi_selector import select_roi_interactive, validate_roi
 from camera_displacement.tracker import count_roi_features
 from camera_displacement.video_io import VideoError, VideoLoader, parse_layout
-from camera_displacement.reporting import append_mm_to_csv, generate_html_report
+from camera_displacement.reporting import (
+    append_mm_to_csv,
+    generate_html_report,
+    generate_combined_plots,
+    load_csv_series,
+    generate_comparison_plots,
+    generate_comparison_report,
+    generate_multi_camera_comparison_report,
+)
 
 console = Console()
 
@@ -85,6 +93,12 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--graphs", action="store_true",
                    help="Generate PNG time-series graphs in the output folder (off by default).")
 
+    # Graph filtering.
+    p.add_argument("--no-hv-displacement", action="store_true",
+                   help="Exclude horizontal and vertical displacement (Δx, Δy) graphs.")
+    p.add_argument("--no-confidence", action="store_true",
+                   help="Exclude tracking confidence graph.")
+
     # Multi-camera composite video.
     mc = p.add_argument_group("multi-camera (composite video)")
     mc.add_argument(
@@ -106,6 +120,39 @@ def parse_args(argv=None) -> argparse.Namespace:
             "top-to-bottom). Defaults to all slots in the grid. "
             "E.g. use 3 for a 2x2 grid where the bottom-right slot is empty."
         ),
+    )
+    mc.add_argument(
+        "--combine-cameras",
+        action="store_true",
+        help=(
+            "Overlay all cameras on the same graphs instead of one graph set "
+            "per camera. Per-camera sections are still included in the report."
+        ),
+    )
+
+    # Comparison mode: load pre-analyzed CSVs and overlay them on shared graphs.
+    cmp = p.add_argument_group("comparison mode (compare pre-analyzed results)")
+    cmp.add_argument(
+        "--compare", nargs="+", metavar="DIR",
+        help=(
+            "Two or more output directories to compare. When given, skips "
+            "video analysis and only generates comparison plots + report."
+        ),
+    )
+    cmp.add_argument(
+        "--compare-labels", nargs="+", metavar="LABEL",
+        help="Display labels for each compared directory (same order as --compare).",
+    )
+    cmp.add_argument(
+        "--compare-camera", metavar="CAMERA",
+        help=(
+            "Camera sub-folder inside each output dir, e.g. camera_0.  "
+            "Omit when the CSV is at the root of the output dir."
+        ),
+    )
+    cmp.add_argument(
+        "--compare-output", default="out-compare",
+        help="Output folder for comparison plots and HTML report.",
     )
 
     return p.parse_args(argv)
@@ -166,6 +213,8 @@ def _print_summary(outputs, calibration, label: str = "") -> None:
     mean_px = s.get("mean_total_displacement_px", 0.0)
     peak_frame = s.get("max_total_at_frame", 0)
     peak_t = s.get("max_total_at_timestamp", 0.0)
+    peak_rot = s.get("peak_abs_rotation_degrees", 0.0)
+    mean_rot = s.get("mean_abs_rotation_degrees", 0.0)
     ok = s.get("ok_frames", 0)
     low = s.get("low_confidence_frames", 0)
     lost = s.get("lost_frames", 0)
@@ -195,6 +244,9 @@ def _print_summary(outputs, calibration, label: str = "") -> None:
         table.add_row("Mean displacement",
                       f"{calibration.px_to_mm(mean_px):.3f} mm", "(calibrated)")
 
+    table.add_row("Peak |rotation|", f"{peak_rot:.3f}°", "")
+    table.add_row("Mean |rotation|", f"{mean_rot:.3f}°", "")
+
     table.add_row(
         "Tracking quality",
         f"[{quality_color}]{quality_pct}% reliable[/{quality_color}]",
@@ -207,23 +259,21 @@ def _print_summary(outputs, calibration, label: str = "") -> None:
 
 
 def _open_plots_in_windows(png_paths: list) -> None:
-    """Open the first PNG in the list with the Windows default image viewer."""
+    """Open each PNG in the list with the Windows default image viewer."""
     import subprocess
     if not png_paths:
         return
-    # Only open the overview — explorer.exe handles spaces correctly and
-    # never misroutes to another app the way 'start ""' can.
-    path = png_paths[0]
-    try:
-        win_path = subprocess.check_output(
-            ["wslpath", "-w", os.path.abspath(path)], text=True
-        ).strip()
-        subprocess.Popen(
-            ["explorer.exe", win_path],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-    except Exception:
-        pass
+    for path in png_paths:
+        try:
+            win_path = subprocess.check_output(
+                ["wslpath", "-w", os.path.abspath(path)], text=True
+            ).strip()
+            subprocess.Popen(
+                ["explorer.exe", win_path],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            pass
 
 
 def _select_roi_with_retry(
@@ -284,8 +334,128 @@ def _prompt_mm_conversion(outputs_list, calibration) -> None:
                       f"Mean = [bold white]{mean_mm:.3f} mm[/bold white]")
 
 
+def _build_excluded_series(args) -> set:
+    """Return the set of series keys to omit from graphs based on CLI flags."""
+    excluded: set = set()
+    if getattr(args, "no_hv_displacement", False):
+        excluded.update(["dx", "dy"])
+    if getattr(args, "no_confidence", False):
+        excluded.add("conf")
+    return excluded
+
+
+def _discover_cameras(dirs: list) -> list:
+    """Return sorted list of camera_* subdirs found in any of the given output directories."""
+    cameras: set = set()
+    for d in dirs:
+        if not os.path.isdir(d):
+            continue
+        for entry in os.listdir(d):
+            if entry.startswith("camera_") and os.path.isdir(os.path.join(d, entry)):
+                cameras.add(entry)
+    return sorted(cameras)
+
+
+def _run_compare(args) -> int:
+    """Load pre-analyzed CSVs from multiple output dirs and produce comparison plots."""
+    dirs = args.compare
+    labels = list(args.compare_labels or [])
+    # Pad missing labels with directory basenames.
+    while len(labels) < len(dirs):
+        labels.append(os.path.basename(dirs[len(labels)].rstrip("/\\")))
+
+    camera_arg = getattr(args, "compare_camera", None)
+    out_dir = args.compare_output
+    excluded = _build_excluded_series(args)
+
+    # Determine which cameras to compare: explicit arg or auto-discover all.
+    if camera_arg:
+        cameras_to_compare = [camera_arg]
+    else:
+        cameras_to_compare = _discover_cameras(dirs) or [None]
+
+    console.print(
+        f"\n[bold]Comparison mode:[/bold] {len(dirs)} recording(s), "
+        f"{len(cameras_to_compare)} camera(s)"
+    )
+
+    all_camera_sections = []
+    total_plots = 0
+
+    for camera in cameras_to_compare:
+        cam_out_dir = os.path.join(out_dir, camera) if camera else out_dir
+        camera_label = camera or "root"
+
+        datasets = []
+        for label, d in zip(labels, dirs):
+            csv_dir = os.path.join(d, camera) if camera else d
+            csv_path = os.path.join(csv_dir, "absolute_displacement.csv")
+            if not os.path.isfile(csv_path):
+                console.print(f"  [yellow]CSV not found — skipping:[/yellow] {csv_path}")
+                continue
+            series = load_csv_series(csv_path)
+            datasets.append((label, series))
+            console.print(
+                f"  [green]Loaded[/green] [{camera_label}] [bold]{label}[/bold]: {csv_path} "
+                f"[dim]({len(series['t'])} frames)[/dim]"
+            )
+
+        if not datasets:
+            console.print(f"  [yellow]No data found for {camera_label} — skipping.[/yellow]")
+            continue
+
+        os.makedirs(cam_out_dir, exist_ok=True)
+        console.print(f"\n[bold]Generating comparison plots for {camera_label}…[/bold]")
+        plots = generate_comparison_plots(datasets, cam_out_dir, excluded_series=excluded)
+        all_camera_sections.append((camera_label, datasets, plots))
+        total_plots += len(plots)
+
+    if not all_camera_sections:
+        console.print("[red]No comparison data found in the given directories.[/red]")
+        return 2
+
+    os.makedirs(out_dir, exist_ok=True)
+    report_path = os.path.join(out_dir, "comparison_report.html")
+    title_str = " vs ".join(labels)
+    generate_multi_camera_comparison_report(
+        all_camera_sections, report_path,
+        title=f"Displacement Comparison — {title_str}",
+        open_browser=True,
+    )
+
+    out_table = Table(box=rich_box.SIMPLE, show_header=False, padding=(0, 2))
+    out_table.add_column("Type", style="dim", no_wrap=True)
+    out_table.add_column("Path", style="cyan")
+    out_table.add_row(
+        "Comparison plots",
+        f"{total_plots} PNG files across {len(all_camera_sections)} camera(s) in {out_dir}/",
+    )
+    out_table.add_row("HTML report", report_path)
+    console.print(Panel(
+        out_table,
+        title=f"[bold]Comparison → {os.path.abspath(out_dir)}[/bold]",
+        border_style="green", padding=(1, 2),
+    ))
+
+    # Open overview PNGs in Windows image viewer (cap at first 3 to avoid flooding).
+    overviews = []
+    for cam_label, _, _ in all_camera_sections:
+        cam_dir = os.path.join(out_dir, cam_label) if cam_label != "root" else out_dir
+        ov = os.path.join(cam_dir, "comparison_overview.png")
+        if os.path.isfile(ov):
+            overviews.append(ov)
+    if overviews:
+        _open_plots_in_windows(overviews[:3])
+
+    return 0
+
+
 def main(argv=None) -> int:
     args = parse_args(argv)
+
+    # Comparison mode: load existing CSVs and overlay them — no video needed.
+    if getattr(args, "compare", None):
+        return _run_compare(args)
 
     # 1. Video selection.
     video_path = args.video
@@ -365,6 +535,7 @@ def main(argv=None) -> int:
         write_annotated_video=not args.no_video,
         write_graphs=True,
         progress=progress_bar,
+        excluded_series=_build_excluded_series(args),
     )
 
     console.print("\n[bold]Analyzing...[/bold]")
@@ -431,6 +602,7 @@ def _run_multi_camera(args, video_path, info, baseline, baseline_index) -> int:
     calibration = build_calibration(args, baseline)
     console.print(f"  [dim]Calibration: {calibration.describe()}[/dim]")
 
+    excluded_series = _build_excluded_series(args)
     output_root = args.output
     all_outputs = []
 
@@ -471,6 +643,7 @@ def _run_multi_camera(args, video_path, info, baseline, baseline_index) -> int:
             write_graphs=True,
             progress=progress_bar,
             camera_region=region.as_xywh(),
+            excluded_series=excluded_series,
         )
 
         console.print(f"  [bold]Analyzing {cam_label}...[/bold]")
@@ -489,6 +662,16 @@ def _run_multi_camera(args, video_path, info, baseline, baseline_index) -> int:
 
     _prompt_mm_conversion(all_outputs, calibration)
 
+    # Combined graphs (all cameras on the same axes).
+    combined_dir = None
+    if args.combine_cameras:
+        combined_dir = args.output
+        console.print("\n[bold]Generating combined camera plots…[/bold]")
+        combined_data = [
+            (label, outputs.absolute_results) for label, outputs, _ in all_outputs
+        ]
+        generate_combined_plots(combined_data, combined_dir, excluded_series=excluded_series)
+
     # HTML report (all cameras in one page).
     report_path = os.path.join(args.output, "report.html")
     generate_html_report(
@@ -497,6 +680,7 @@ def _run_multi_camera(args, video_path, info, baseline, baseline_index) -> int:
         report_path,
         video_name=os.path.basename(video_path),
         open_browser=False,
+        combined_dir=combined_dir,
     )
 
     # Final summary table.
@@ -504,6 +688,8 @@ def _run_multi_camera(args, video_path, info, baseline, baseline_index) -> int:
     out_table.add_column("Camera", style="bold cyan", no_wrap=True)
     out_table.add_column("Peak (px)", justify="right")
     out_table.add_column("Mean (px)", justify="right")
+    out_table.add_column("Peak |rot| (°)", justify="right")
+    out_table.add_column("Mean |rot| (°)", justify="right")
     out_table.add_column("Quality", justify="right")
     out_table.add_column("Output dir", style="dim")
 
@@ -511,6 +697,8 @@ def _run_multi_camera(args, video_path, info, baseline, baseline_index) -> int:
         s = outputs.absolute_summary
         peak = s.get("max_total_displacement_px", 0.0)
         mean = s.get("mean_total_displacement_px", 0.0)
+        peak_rot = s.get("peak_abs_rotation_degrees", 0.0)
+        mean_rot = s.get("mean_abs_rotation_degrees", 0.0)
         total = s.get("frames", 0)
         ok = s.get("ok_frames", 0)
         quality_pct = int(100 * ok / total) if total else 0
@@ -519,6 +707,8 @@ def _run_multi_camera(args, video_path, info, baseline, baseline_index) -> int:
             label,
             f"{peak:.2f}",
             f"{mean:.2f}",
+            f"{peak_rot:.3f}",
+            f"{mean_rot:.3f}",
             f"[{qcolor}]{quality_pct}%[/{qcolor}]",
             cam_dir,
         )
@@ -530,12 +720,16 @@ def _run_multi_camera(args, video_path, info, baseline, baseline_index) -> int:
     ))
     console.print(f"[bold green]HTML report:[/bold green] {os.path.abspath(report_path)}")
 
-    # Open overview PNGs for each camera in Windows Photos.
-    all_overviews = [
-        os.path.join(cam_dir, "absolute_overview.png")
-        for _, _, cam_dir in all_outputs
-    ]
-    plots_to_open = [p for p in all_overviews if os.path.isfile(p)]
+    # Open overview PNGs in Windows Photos.
+    if args.combine_cameras and combined_dir:
+        combined_overview = os.path.join(combined_dir, "combined_overview.png")
+        plots_to_open = [combined_overview] if os.path.isfile(combined_overview) else []
+    else:
+        all_overviews = [
+            os.path.join(cam_dir, "absolute_overview.png")
+            for _, _, cam_dir in all_outputs
+        ]
+        plots_to_open = [p for p in all_overviews if os.path.isfile(p)]
     if plots_to_open:
         console.print("\n[bold green]Opening graphs in Windows Photos…[/bold green]")
         _open_plots_in_windows(plots_to_open)

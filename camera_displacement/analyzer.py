@@ -36,6 +36,8 @@ class AnalyzerConfig:
     # Optional crop applied to every frame before analysis.
     # (x, y, w, h) in full-frame pixels; ROI coordinates are relative to the crop.
     camera_region: Optional[ROI] = None
+    # Series keys to omit from graph output: "dx", "dy", "conf".
+    excluded_series: set = field(default_factory=set)
 
 
 @dataclass
@@ -132,8 +134,10 @@ class DisplacementAnalyzer:
         write_csv(con_results, con_csv, cfg.calibration)
 
         if cfg.write_graphs:
-            abs_plots = generate_plots(abs_results, cfg.output_dir, prefix="absolute_")
-            con_plots = generate_plots(con_results, cfg.output_dir, prefix="consecutive_")
+            abs_plots = generate_plots(abs_results, cfg.output_dir, prefix="absolute_",
+                                       excluded_series=cfg.excluded_series)
+            con_plots = generate_plots(con_results, cfg.output_dir, prefix="consecutive_",
+                                       excluded_series=cfg.excluded_series)
         else:
             abs_plots, con_plots = [], []
 

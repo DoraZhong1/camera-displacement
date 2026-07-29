@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import csv
 import os
+import subprocess
 import webbrowser
 from typing import Dict, List, Optional, Tuple
 
@@ -89,6 +90,29 @@ _PALETTE = {
 }
 
 
+def _win_downloads() -> Optional[str]:
+    """Return the WSL Linux path to the current Windows user's Downloads folder.
+
+    Works for any Windows username.  Returns ``None`` when not running under WSL
+    or when the folder cannot be determined.
+    """
+    import subprocess
+    try:
+        win_path = subprocess.check_output(
+            ["powershell.exe", "-NoProfile", "-Command",
+             "[Environment]::GetFolderPath('UserProfile') + '\\\\Downloads'"],
+            text=True, stderr=subprocess.DEVNULL,
+        ).strip()
+        if not win_path:
+            return None
+        linux_path = subprocess.check_output(
+            ["wslpath", "-u", win_path], text=True, stderr=subprocess.DEVNULL
+        ).strip()
+        return linux_path if os.path.isdir(linux_path) else None
+    except Exception:
+        return None
+
+
 def _apply_dark_theme(fig, axes_list):
     """Apply a consistent light theme to a figure and all its axes."""
     fig.patch.set_facecolor(_DARK_BG)
@@ -103,23 +127,38 @@ def _apply_dark_theme(fig, axes_list):
         ax.grid(True, color=_GRID_COLOR, linewidth=0.8, linestyle="--", alpha=1.0)
 
 
-def generate_plots(results: List[FrameResult], out_dir: str, prefix: str = "") -> List[str]:
-    """Create styled time-series graphs. Returns saved file paths."""
+def generate_plots(
+    results: List[FrameResult],
+    out_dir: str,
+    prefix: str = "",
+    excluded_series: Optional[set] = None,
+) -> List[str]:
+    """Create styled time-series graphs. Returns saved file paths.
+
+    Parameters
+    ----------
+    excluded_series:
+        Set of series keys to skip.  Recognised keys: ``"dx"``, ``"dy"``,
+        ``"conf"``.  ``"total"`` and ``"rot"`` are always included.
+    """
     if not results:
         return []
+    excluded = excluded_series or set()
     os.makedirs(out_dir, exist_ok=True)
     s = _series(results)
 
-    specs = [
-        ("dx",    "Horizontal Displacement  Δx (px)",  "displacement_x_vs_time.png"),
-        ("dy",    "Vertical Displacement  Δy (px)",    "displacement_y_vs_time.png"),
-        ("total", "Total Displacement  √(Δx²+Δy²)  (px)", "total_displacement_vs_time.png"),
+    all_specs = [
+        ("dx",    "Horizontal Displacement  Δx (px)",      "displacement_x_vs_time.png"),
+        ("dy",    "Vertical Displacement  Δy (px)",         "displacement_y_vs_time.png"),
+        ("total", "Total Displacement  √(Δx²+Δy²)  (px)",  "total_displacement_vs_time.png"),
         ("rot",   "In-Plane Rotation of Camera (degrees)",  "rotation_vs_time.png"),
-        ("conf",  "Tracking Confidence",                "confidence_vs_time.png"),
+        ("conf",  "Tracking Confidence",                    "confidence_vs_time.png"),
     ]
 
     saved = []
-    for key, ylabel, fname in specs:
+    for key, ylabel, fname in all_specs:
+        if key in excluded:
+            continue
         color = _PALETTE[key]
         fig, ax = plt.subplots(figsize=(11, 3.8))
         ax.fill_between(s["t"], s[key], alpha=0.15, color=color)
@@ -132,65 +171,746 @@ def generate_plots(results: List[FrameResult], out_dir: str, prefix: str = "") -
         _apply_dark_theme(fig, [ax])
         fig.tight_layout(pad=1.8)
         path = os.path.join(out_dir, prefix + fname)
-        fig.savefig(path, dpi=140, facecolor=fig.get_facecolor())
+        fig.savefig(path, dpi=140, bbox_inches='tight', facecolor=fig.get_facecolor())
         plt.close(fig)
         saved.append(path)
 
-    # Overview dashboard (2x2 grid).
-    fig, axes = plt.subplots(2, 2, figsize=(16, 10))
-    ax_xy   = axes[0][0]
-    ax_tot  = axes[0][1]
-    ax_rot  = axes[1][0]
-    ax_conf = axes[1][1]
+    # Overview dashboard — panels depend on what's not excluded.
+    overview_panels: List[str] = []
+    if not ({"dx", "dy"} & excluded):
+        overview_panels.append("xy")
+    overview_panels.append("total")
+    overview_panels.append("rot")
+    if "conf" not in excluded:
+        overview_panels.append("conf")
+
+    n = len(overview_panels)
+    if n == 0:
+        return saved
+
+    if n == 4:
+        fig, _g = plt.subplots(2, 2, figsize=(16, 10))
+        axes_list = [_g[0][0], _g[0][1], _g[1][0], _g[1][1]]
+    elif n == 3:
+        fig, _g = plt.subplots(1, 3, figsize=(24, 5))
+        axes_list = list(_g)
+    elif n == 2:
+        fig, _g = plt.subplots(1, 2, figsize=(16, 5))
+        axes_list = list(_g)
+    else:
+        fig, _g = plt.subplots(1, 1, figsize=(8, 5))
+        axes_list = [_g]
 
     fig.suptitle("Camera Displacement Overview", fontsize=15, fontweight="bold",
                  color=_TEXT_COLOR, y=0.98)
 
-    # Top-left: Δx and Δy
-    ax_xy.fill_between(s["t"], s["dx"], alpha=0.18, color=_PALETTE["dx"])
-    ax_xy.fill_between(s["t"], s["dy"], alpha=0.18, color=_PALETTE["dy"])
-    ax_xy.plot(s["t"], s["dx"], label="Δx (horizontal)", color=_PALETTE["dx"], linewidth=1.5)
-    ax_xy.plot(s["t"], s["dy"], label="Δy (vertical)",   color=_PALETTE["dy"], linewidth=1.5)
-    ax_xy.set_title("Horizontal & Vertical Displacement", fontsize=11, fontweight="bold")
-    ax_xy.set_ylabel("Displacement (px)", fontsize=10)
-    ax_xy.set_xlabel("Time (s)", fontsize=10)
-    leg = ax_xy.legend(frameon=True, fontsize=9)
-    leg.get_frame().set_facecolor(_PANEL_BG)
-    leg.get_frame().set_edgecolor(_GRID_COLOR)
-    for txt in leg.get_texts():
-        txt.set_color(_TEXT_COLOR)
+    for ax, panel in zip(axes_list, overview_panels):
+        if panel == "xy":
+            ax.fill_between(s["t"], s["dx"], alpha=0.18, color=_PALETTE["dx"])
+            ax.fill_between(s["t"], s["dy"], alpha=0.18, color=_PALETTE["dy"])
+            ax.plot(s["t"], s["dx"], label="Δx (horizontal)", color=_PALETTE["dx"], linewidth=1.5)
+            ax.plot(s["t"], s["dy"], label="Δy (vertical)",   color=_PALETTE["dy"], linewidth=1.5)
+            ax.set_title("Horizontal & Vertical Displacement", fontsize=11, fontweight="bold")
+            ax.set_ylabel("Displacement (px)", fontsize=10)
+            ax.set_xlabel("Time (s)", fontsize=10)
+            leg = ax.legend(frameon=True, fontsize=9)
+            leg.get_frame().set_facecolor(_PANEL_BG)
+            leg.get_frame().set_edgecolor(_GRID_COLOR)
+            for txt in leg.get_texts():
+                txt.set_color(_TEXT_COLOR)
+        elif panel == "total":
+            ax.fill_between(s["t"], s["total"], alpha=0.18, color=_PALETTE["total"])
+            ax.plot(s["t"], s["total"], color=_PALETTE["total"], linewidth=1.5)
+            ax.set_title("Total Displacement  √(Δx²+Δy²)", fontsize=11, fontweight="bold")
+            ax.set_ylabel("Displacement (px)", fontsize=10)
+            ax.set_xlabel("Time (s)", fontsize=10)
+        elif panel == "rot":
+            ax.fill_between(s["t"], s["rot"], alpha=0.18, color=_PALETTE["rot"])
+            ax.plot(s["t"], s["rot"], color=_PALETTE["rot"], linewidth=1.5)
+            ax.set_title("In-Plane Camera Rotation", fontsize=11, fontweight="bold")
+            ax.set_ylabel("Rotation (°)", fontsize=10)
+            ax.set_xlabel("Time (s)", fontsize=10)
+        elif panel == "conf":
+            ax.fill_between(s["t"], s["conf"], alpha=0.18, color=_PALETTE["conf"])
+            ax.plot(s["t"], s["conf"], color=_PALETTE["conf"], linewidth=1.5)
+            ax.set_title("Tracking Confidence", fontsize=11, fontweight="bold")
+            ax.set_ylabel("Confidence (0–1)", fontsize=10)
+            ax.set_xlabel("Time (s)", fontsize=10)
+            ax.set_ylim(-0.02, 1.02)
 
-    # Top-right: total displacement
-    ax_tot.fill_between(s["t"], s["total"], alpha=0.18, color=_PALETTE["total"])
-    ax_tot.plot(s["t"], s["total"], color=_PALETTE["total"], linewidth=1.5)
-    ax_tot.set_title("Total Displacement  √(Δx²+Δy²)", fontsize=11, fontweight="bold")
-    ax_tot.set_ylabel("Displacement (px)", fontsize=10)
-    ax_tot.set_xlabel("Time (s)", fontsize=10)
-
-    # Bottom-left: rotation
-    ax_rot.fill_between(s["t"], s["rot"], alpha=0.18, color=_PALETTE["rot"])
-    ax_rot.plot(s["t"], s["rot"], color=_PALETTE["rot"], linewidth=1.5)
-    ax_rot.set_title("In-Plane Camera Rotation", fontsize=11, fontweight="bold")
-    ax_rot.set_ylabel("Rotation (°)", fontsize=10)
-    ax_rot.set_xlabel("Time (s)", fontsize=10)
-
-    # Bottom-right: confidence
-    ax_conf.fill_between(s["t"], s["conf"], alpha=0.18, color=_PALETTE["conf"])
-    ax_conf.plot(s["t"], s["conf"], color=_PALETTE["conf"], linewidth=1.5)
-    ax_conf.set_title("Tracking Confidence", fontsize=11, fontweight="bold")
-    ax_conf.set_ylabel("Confidence (0–1)", fontsize=10)
-    ax_conf.set_xlabel("Time (s)", fontsize=10)
-    ax_conf.set_ylim(-0.02, 1.02)
-
-    _apply_dark_theme(fig, [ax_xy, ax_tot, ax_rot, ax_conf])
-    fig.tight_layout(pad=2.0, w_pad=3.0, h_pad=3.0)
-    fig.subplots_adjust(top=0.92)
+    _apply_dark_theme(fig, axes_list)
+    fig.tight_layout(pad=2.0, w_pad=3.0, h_pad=3.0, rect=[0, 0, 1, 0.88])
 
     path = os.path.join(out_dir, prefix + "overview.png")
-    fig.savefig(path, dpi=140, facecolor=fig.get_facecolor())
+    fig.savefig(path, dpi=140, bbox_inches='tight', facecolor=fig.get_facecolor())
     plt.close(fig)
     saved.append(path)
     return saved
+
+
+# Per-camera colours used when overlaying multiple cameras on the same axes.
+_CAMERA_PALETTE = [
+    "#0284c7",  # blue
+    "#ea580c",  # orange
+    "#16a34a",  # green
+    "#dc2626",  # red
+    "#7c3aed",  # violet
+    "#db2777",  # pink
+    "#ca8a04",  # yellow
+    "#0891b2",  # cyan
+]
+
+
+def generate_combined_plots(
+    camera_data: List[Tuple[str, List[FrameResult]]],
+    out_dir: str,
+    excluded_series: Optional[set] = None,
+) -> List[str]:
+    """Create time-series graphs with all cameras overlaid on the same axes.
+
+    Parameters
+    ----------
+    camera_data:
+        List of ``(label, results)`` pairs, one per camera.
+    out_dir:
+        Directory where PNG files are written (``combined_*.png``).
+    excluded_series:
+        Set of series keys to skip: ``"dx"``, ``"dy"``, ``"conf"``.
+
+    Returns
+    -------
+    List of saved file paths (individual channels + overview).
+    """
+    if not camera_data:
+        return []
+    excluded = excluded_series or set()
+    os.makedirs(out_dir, exist_ok=True)
+
+    series_list = [(label, _series(results)) for label, results in camera_data]
+    colors = [_CAMERA_PALETTE[i % len(_CAMERA_PALETTE)] for i in range(len(series_list))]
+
+    def _add_legend(ax):
+        leg = ax.legend(frameon=True, fontsize=9)
+        leg.get_frame().set_facecolor(_PANEL_BG)
+        leg.get_frame().set_edgecolor(_GRID_COLOR)
+        for txt in leg.get_texts():
+            txt.set_color(_TEXT_COLOR)
+
+    # Individual channel plots — all cameras on the same axes.
+    all_specs = [
+        ("dx",    "Horizontal Displacement  Δx (px)",     "combined_displacement_x_vs_time.png"),
+        ("dy",    "Vertical Displacement  Δy (px)",        "combined_displacement_y_vs_time.png"),
+        ("total", "Total Displacement  √(Δx²+Δy²)  (px)", "combined_total_displacement_vs_time.png"),
+        ("rot",   "In-Plane Rotation (degrees)",            "combined_rotation_vs_time.png"),
+        ("conf",  "Tracking Confidence",                    "combined_confidence_vs_time.png"),
+    ]
+
+    saved = []
+    for key, ylabel, fname in all_specs:
+        if key in excluded:
+            continue
+        fig, ax = plt.subplots(figsize=(11, 3.8))
+        for (label, s), color in zip(series_list, colors):
+            ax.fill_between(s["t"], s[key], alpha=0.10, color=color)
+            ax.plot(s["t"], s[key], label=label, color=color, linewidth=1.6)
+        ax.set_xlabel("Time (s)", fontsize=10)
+        ax.set_ylabel(ylabel, fontsize=10)
+        ax.set_title(ylabel + "  vs  Time  —  all cameras", fontsize=12, fontweight="bold", pad=10)
+        if key == "conf":
+            ax.set_ylim(-0.02, 1.02)
+        _add_legend(ax)
+        _apply_dark_theme(fig, [ax])
+        fig.tight_layout(pad=1.8)
+        path = os.path.join(out_dir, fname)
+        fig.savefig(path, dpi=140, bbox_inches='tight', facecolor=fig.get_facecolor())
+        plt.close(fig)
+        saved.append(path)
+
+    # Overview dashboard — panels depend on what's not excluded.
+    overview_panels: List[str] = []
+    if not ({"dx", "dy"} & excluded):
+        overview_panels.append("xy")
+    overview_panels.append("total")
+    overview_panels.append("rot")
+    if "conf" not in excluded:
+        overview_panels.append("conf")
+
+    n = len(overview_panels)
+    if n == 0:
+        return saved
+
+    if n == 4:
+        fig, _g = plt.subplots(2, 2, figsize=(16, 10))
+        axes_list = [_g[0][0], _g[0][1], _g[1][0], _g[1][1]]
+    elif n == 3:
+        fig, _g = plt.subplots(1, 3, figsize=(24, 5))
+        axes_list = list(_g)
+    elif n == 2:
+        fig, _g = plt.subplots(1, 2, figsize=(16, 5))
+        axes_list = list(_g)
+    else:
+        fig, _g = plt.subplots(1, 1, figsize=(8, 5))
+        axes_list = [_g]
+
+    fig.suptitle("Camera Displacement Overview — All Cameras", fontsize=15, fontweight="bold",
+                 color=_TEXT_COLOR, y=0.98)
+
+    for ax, panel in zip(axes_list, overview_panels):
+        if panel == "xy":
+            for (label, s), color in zip(series_list, colors):
+                ax.fill_between(s["t"], s["dx"], alpha=0.08, color=color)
+                ax.fill_between(s["t"], s["dy"], alpha=0.08, color=color)
+                ax.plot(s["t"], s["dx"], label=f"{label} Δx", color=color, linewidth=1.5)
+                ax.plot(s["t"], s["dy"], label=f"{label} Δy", color=color, linewidth=1.5, linestyle="--")
+            ax.set_title("Horizontal & Vertical Displacement", fontsize=11, fontweight="bold")
+            ax.set_ylabel("Displacement (px)", fontsize=10)
+            ax.set_xlabel("Time (s)", fontsize=10)
+            _add_legend(ax)
+        elif panel == "total":
+            for (label, s), color in zip(series_list, colors):
+                ax.fill_between(s["t"], s["total"], alpha=0.10, color=color)
+                ax.plot(s["t"], s["total"], label=label, color=color, linewidth=1.5)
+            ax.set_title("Total Displacement  √(Δx²+Δy²)", fontsize=11, fontweight="bold")
+            ax.set_ylabel("Displacement (px)", fontsize=10)
+            ax.set_xlabel("Time (s)", fontsize=10)
+            _add_legend(ax)
+        elif panel == "rot":
+            for (label, s), color in zip(series_list, colors):
+                ax.fill_between(s["t"], s["rot"], alpha=0.10, color=color)
+                ax.plot(s["t"], s["rot"], label=label, color=color, linewidth=1.5)
+            ax.set_title("In-Plane Camera Rotation", fontsize=11, fontweight="bold")
+            ax.set_ylabel("Rotation (°)", fontsize=10)
+            ax.set_xlabel("Time (s)", fontsize=10)
+            _add_legend(ax)
+        elif panel == "conf":
+            for (label, s), color in zip(series_list, colors):
+                ax.fill_between(s["t"], s["conf"], alpha=0.10, color=color)
+                ax.plot(s["t"], s["conf"], label=label, color=color, linewidth=1.5)
+            ax.set_title("Tracking Confidence", fontsize=11, fontweight="bold")
+            ax.set_ylabel("Confidence (0–1)", fontsize=10)
+            ax.set_xlabel("Time (s)", fontsize=10)
+            ax.set_ylim(-0.02, 1.02)
+            _add_legend(ax)
+
+    _apply_dark_theme(fig, axes_list)
+    fig.tight_layout(pad=2.0, w_pad=3.0, h_pad=3.0, rect=[0, 0, 1, 0.88])
+
+    path = os.path.join(out_dir, "combined_overview.png")
+    fig.savefig(path, dpi=140, bbox_inches='tight', facecolor=fig.get_facecolor())
+    plt.close(fig)
+    saved.append(path)
+    return saved
+
+
+def load_csv_series(csv_path: str) -> dict:
+    """Read a displacement CSV and return a plot-ready series dict.
+
+    Returns a dict with keys ``t``, ``dx``, ``dy``, ``total``, ``rot``,
+    ``conf`` (each a ``list[float]``).
+    """
+    import csv as _csv
+
+    t, dx, dy, total, rot, conf = [], [], [], [], [], []
+    with open(csv_path, newline="") as fh:
+        for row in _csv.DictReader(fh):
+            try:
+                t.append(float(row["timestamp_seconds"]))
+                dx.append(float(row["displacement_x_pixels"]))
+                dy.append(float(row["displacement_y_pixels"]))
+                total.append(float(row["total_displacement_pixels"]))
+                rot.append(float(row["rotation_degrees"]))
+                conf.append(float(row["tracking_confidence"]))
+            except (KeyError, ValueError):
+                continue
+    return {"t": t, "dx": dx, "dy": dy, "total": total, "rot": rot, "conf": conf}
+
+
+def generate_comparison_plots(
+    datasets: List[Tuple[str, dict]],
+    out_dir: str,
+    excluded_series: Optional[set] = None,
+) -> List[str]:
+    """Create comparison plots with two or more pre-loaded datasets overlaid.
+
+    Parameters
+    ----------
+    datasets:
+        List of ``(label, series_dict)`` pairs where *series_dict* is the
+        dict returned by :func:`load_csv_series`.
+    out_dir:
+        Directory where ``comparison_*.png`` files are written.
+    excluded_series:
+        Set of series keys to skip: ``"dx"``, ``"dy"``, ``"conf"``.
+
+    Returns
+    -------
+    List of saved file paths (individual channels + overview).
+    """
+    if not datasets:
+        return []
+    excluded = excluded_series or set()
+    os.makedirs(out_dir, exist_ok=True)
+
+    colors = [_CAMERA_PALETTE[i % len(_CAMERA_PALETTE)] for i in range(len(datasets))]
+
+    def _add_legend(ax):
+        leg = ax.legend(frameon=True, fontsize=9)
+        leg.get_frame().set_facecolor(_PANEL_BG)
+        leg.get_frame().set_edgecolor(_GRID_COLOR)
+        for txt in leg.get_texts():
+            txt.set_color(_TEXT_COLOR)
+
+    all_specs = [
+        ("dx",    "Horizontal Displacement  Δx (px)",      "comparison_displacement_x_vs_time.png"),
+        ("dy",    "Vertical Displacement  Δy (px)",         "comparison_displacement_y_vs_time.png"),
+        ("total", "Total Displacement  √(Δx²+Δy²)  (px)",  "comparison_total_displacement_vs_time.png"),
+        ("rot",   "In-Plane Rotation (degrees)",             "comparison_rotation_vs_time.png"),
+        ("conf",  "Tracking Confidence",                     "comparison_confidence_vs_time.png"),
+    ]
+
+    saved = []
+    for key, ylabel, fname in all_specs:
+        if key in excluded:
+            continue
+        fig, ax = plt.subplots(figsize=(11, 3.8))
+        for (label, s), color in zip(datasets, colors):
+            ax.fill_between(s["t"], s[key], alpha=0.10, color=color)
+            ax.plot(s["t"], s[key], label=label, color=color, linewidth=1.6)
+        ax.set_xlabel("Time (s)", fontsize=10)
+        ax.set_ylabel(ylabel, fontsize=10)
+        ax.set_title(ylabel + "  vs  Time", fontsize=12, fontweight="bold", pad=10)
+        if key == "conf":
+            ax.set_ylim(-0.02, 1.02)
+        _add_legend(ax)
+        _apply_dark_theme(fig, [ax])
+        fig.tight_layout(pad=1.8)
+        path = os.path.join(out_dir, fname)
+        fig.savefig(path, dpi=140, bbox_inches='tight', facecolor=fig.get_facecolor())
+        plt.close(fig)
+        saved.append(path)
+
+    # Overview dashboard.
+    overview_panels: List[str] = []
+    if not ({"dx", "dy"} & excluded):
+        overview_panels.append("xy")
+    overview_panels.append("total")
+    overview_panels.append("rot")
+    if "conf" not in excluded:
+        overview_panels.append("conf")
+
+    n = len(overview_panels)
+    if n == 0:
+        return saved
+
+    if n == 4:
+        fig, _g = plt.subplots(2, 2, figsize=(16, 10))
+        axes_list = [_g[0][0], _g[0][1], _g[1][0], _g[1][1]]
+    elif n == 3:
+        fig, _g = plt.subplots(1, 3, figsize=(24, 5))
+        axes_list = list(_g)
+    elif n == 2:
+        fig, _g = plt.subplots(1, 2, figsize=(16, 5))
+        axes_list = list(_g)
+    else:
+        fig, _g = plt.subplots(1, 1, figsize=(8, 5))
+        axes_list = [_g]
+
+    comp_title = " vs ".join(label for label, _ in datasets)
+    fig.suptitle(f"Displacement Comparison — {comp_title}", fontsize=15,
+                 fontweight="bold", color=_TEXT_COLOR, y=0.98)
+
+    for ax, panel in zip(axes_list, overview_panels):
+        if panel == "xy":
+            for (label, s), color in zip(datasets, colors):
+                ax.fill_between(s["t"], s["dx"], alpha=0.08, color=color)
+                ax.fill_between(s["t"], s["dy"], alpha=0.08, color=color)
+                ax.plot(s["t"], s["dx"], label=f"{label} Δx", color=color, linewidth=1.5)
+                ax.plot(s["t"], s["dy"], label=f"{label} Δy", color=color, linewidth=1.5,
+                        linestyle="--")
+            ax.set_title("Horizontal & Vertical Displacement", fontsize=11, fontweight="bold")
+            ax.set_ylabel("Displacement (px)", fontsize=10)
+            ax.set_xlabel("Time (s)", fontsize=10)
+            _add_legend(ax)
+        elif panel == "total":
+            for (label, s), color in zip(datasets, colors):
+                ax.fill_between(s["t"], s["total"], alpha=0.10, color=color)
+                ax.plot(s["t"], s["total"], label=label, color=color, linewidth=1.5)
+            ax.set_title("Total Displacement  √(Δx²+Δy²)", fontsize=11, fontweight="bold")
+            ax.set_ylabel("Displacement (px)", fontsize=10)
+            ax.set_xlabel("Time (s)", fontsize=10)
+            _add_legend(ax)
+        elif panel == "rot":
+            for (label, s), color in zip(datasets, colors):
+                ax.fill_between(s["t"], s["rot"], alpha=0.10, color=color)
+                ax.plot(s["t"], s["rot"], label=label, color=color, linewidth=1.5)
+            ax.set_title("In-Plane Camera Rotation", fontsize=11, fontweight="bold")
+            ax.set_ylabel("Rotation (°)", fontsize=10)
+            ax.set_xlabel("Time (s)", fontsize=10)
+            _add_legend(ax)
+        elif panel == "conf":
+            for (label, s), color in zip(datasets, colors):
+                ax.fill_between(s["t"], s["conf"], alpha=0.10, color=color)
+                ax.plot(s["t"], s["conf"], label=label, color=color, linewidth=1.5)
+            ax.set_title("Tracking Confidence", fontsize=11, fontweight="bold")
+            ax.set_ylabel("Confidence (0–1)", fontsize=10)
+            ax.set_xlabel("Time (s)", fontsize=10)
+            ax.set_ylim(-0.02, 1.02)
+            _add_legend(ax)
+
+    _apply_dark_theme(fig, axes_list)
+    fig.tight_layout(pad=2.0, w_pad=3.0, h_pad=3.0, rect=[0, 0, 1, 0.88])
+
+    path = os.path.join(out_dir, "comparison_overview.png")
+    fig.savefig(path, dpi=140, bbox_inches='tight', facecolor=fig.get_facecolor())
+    plt.close(fig)
+    saved.append(path)
+    return saved
+
+
+def generate_comparison_report(
+    datasets: List[Tuple[str, dict]],
+    plot_paths: List[str],
+    output_path: str,
+    title: str = "Displacement Comparison",
+    open_browser: bool = True,
+) -> str:
+    """Write a self-contained HTML comparison report.
+
+    Parameters
+    ----------
+    datasets:
+        List of ``(label, series_dict)`` pairs.
+    plot_paths:
+        PNG paths returned by :func:`generate_comparison_plots`.
+    output_path:
+        Where to write the ``.html`` file.
+    title:
+        Page/report title.
+    open_browser:
+        Copy the report to Windows Downloads and open it.
+    """
+
+    def _img_tag(png_path: str) -> str:
+        abs_png = os.path.abspath(png_path)
+        if not os.path.isfile(abs_png):
+            return ""
+        with open(abs_png, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode()
+        return (
+            f'<img src="data:image/png;base64,{b64}" '
+            f'style="max-width:100%;border-radius:8px;display:block;">'
+        )
+
+    colors = [_CAMERA_PALETTE[i % len(_CAMERA_PALETTE)] for i in range(len(datasets))]
+
+    # Stats card per dataset.
+    stats_html = ""
+    for (label, s), color in zip(datasets, colors):
+        totals = s.get("total", [])
+        peak = max(totals) if totals else 0.0
+        mean = (sum(totals) / len(totals)) if totals else 0.0
+        stats_html += f"""
+        <div style="background:#0f172a;border:2px solid {color};border-radius:10px;
+                    padding:16px 20px;flex:1;min-width:200px;">
+          <div style="color:{color};font-size:0.78em;text-transform:uppercase;
+                      letter-spacing:0.08em;margin-bottom:8px;font-weight:700;">{label}</div>
+          <div style="color:#f8fafc;font-size:1.15em;font-weight:700;">
+            Peak: {peak:.2f} px</div>
+          <div style="color:#94a3b8;font-size:0.9em;margin-top:4px;">
+            Mean: {mean:.2f} px</div>
+        </div>"""
+
+    _graph_titles = {
+        "comparison_total_displacement_vs_time.png":  "Total Displacement  √(Δx²+Δy²)",
+        "comparison_displacement_x_vs_time.png":      "Horizontal Displacement  Δx",
+        "comparison_displacement_y_vs_time.png":      "Vertical Displacement  Δy",
+        "comparison_rotation_vs_time.png":             "In-Plane Camera Rotation",
+        "comparison_confidence_vs_time.png":           "Tracking Confidence",
+    }
+    overview_tag = ""
+    channel_cards = ""
+    for path in plot_paths:
+        fname = os.path.basename(path)
+        if fname == "comparison_overview.png":
+            overview_tag = _img_tag(path)
+            continue
+        tag = _img_tag(path)
+        if not tag:
+            continue
+        gtitle = _graph_titles.get(fname, fname.replace("_", " ").replace(".png", "").title())
+        channel_cards += f"""
+        <div style="background:#0f172a;border:1px solid #334155;border-radius:10px;
+                    padding:14px;margin-bottom:8px;">
+          <div style="color:#94a3b8;font-size:0.78em;text-transform:uppercase;
+                      letter-spacing:0.07em;margin-bottom:10px;">{gtitle}</div>
+          {tag}
+        </div>"""
+
+    overview_section = (
+        f"""<div style="background:#0f172a;border:1px solid #334155;border-radius:10px;
+                       padding:16px;margin-bottom:24px;">{overview_tag}</div>"""
+        if overview_tag else ""
+    )
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{title}</title>
+  <style>
+    *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
+    body {{
+      font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
+      background: #020817;
+      color: #e2e8f0;
+      min-height: 100vh;
+    }}
+    .topbar {{
+      background: #0f172a;
+      border-bottom: 1px solid #1e293b;
+      padding: 18px 40px;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      position: sticky;
+      top: 0;
+      z-index: 10;
+    }}
+    .topbar-dot {{
+      width: 10px; height: 10px; border-radius: 50%;
+      background: linear-gradient(135deg, #38bdf8, #818cf8);
+      flex-shrink: 0;
+    }}
+    .topbar h1 {{
+      font-size: 1.05em; font-weight: 700; color: #f8fafc; letter-spacing: 0.02em;
+    }}
+    .container {{
+      max-width: 1100px; margin: 0 auto; padding: 40px 24px 64px;
+    }}
+    img {{ border-radius: 8px; }}
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <div class="topbar-dot"></div>
+    <h1>{title}</h1>
+  </div>
+  <div class="container">
+    <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:28px;">
+      {stats_html}
+    </div>
+    {overview_section}
+    {channel_cards}
+  </div>
+</body>
+</html>"""
+
+    with open(output_path, "w", encoding="utf-8") as fh:
+        fh.write(html)
+
+    if open_browser:
+        import shutil
+        win_downloads = _win_downloads()
+        if win_downloads:
+            dest = os.path.join(win_downloads, os.path.basename(output_path))
+            shutil.copy2(output_path, dest)
+            try:
+                win_path = subprocess.check_output(
+                    ["wslpath", "-w", dest], text=True
+                ).strip()
+                subprocess.Popen(
+                    ["cmd.exe", "/c", "start", "", win_path],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
+            except Exception:
+                pass
+        else:
+            webbrowser.open(f"file://{os.path.abspath(output_path)}")
+
+    return output_path
+
+
+def generate_multi_camera_comparison_report(
+    camera_sections: List[Tuple[str, List[Tuple[str, dict]], List[str]]],
+    output_path: str,
+    title: str = "Displacement Comparison",
+    open_browser: bool = True,
+) -> str:
+    """Write a self-contained HTML comparison report with one section per camera.
+
+    Parameters
+    ----------
+    camera_sections:
+        List of ``(camera_label, datasets, plot_paths)`` tuples where
+        ``datasets`` is a list of ``(recording_label, series_dict)`` pairs and
+        ``plot_paths`` is the list returned by :func:`generate_comparison_plots`.
+    output_path:
+        Where to write the ``.html`` file.
+    title:
+        Page/report title.
+    open_browser:
+        Copy the report to Windows Downloads and open it.
+    """
+
+    def _img_tag(png_path: str) -> str:
+        abs_png = os.path.abspath(png_path)
+        if not os.path.isfile(abs_png):
+            return ""
+        with open(abs_png, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode()
+        return (
+            f'<img src="data:image/png;base64,{b64}" '
+            f'style="max-width:100%;border-radius:8px;display:block;">'
+        )
+
+    _graph_titles = {
+        "comparison_total_displacement_vs_time.png": "Total Displacement  √(Δx²+Δy²)",
+        "comparison_displacement_x_vs_time.png":     "Horizontal Displacement  Δx",
+        "comparison_displacement_y_vs_time.png":     "Vertical Displacement  Δy",
+        "comparison_rotation_vs_time.png":            "In-Plane Camera Rotation",
+        "comparison_confidence_vs_time.png":          "Tracking Confidence",
+    }
+
+    camera_sections_html = ""
+    for camera_label, datasets, plot_paths in camera_sections:
+        rec_colors = [_CAMERA_PALETTE[i % len(_CAMERA_PALETTE)] for i in range(len(datasets))]
+
+        stats_html = ""
+        for (label, s), color in zip(datasets, rec_colors):
+            totals = s.get("total", [])
+            abs_rots = [abs(r) for r in s.get("rot", [])]
+            peak_disp = max(totals) if totals else 0.0
+            mean_disp = (sum(totals) / len(totals)) if totals else 0.0
+            peak_rot  = max(abs_rots) if abs_rots else 0.0
+            mean_rot  = (sum(abs_rots) / len(abs_rots)) if abs_rots else 0.0
+            stats_html += f"""
+        <div style="background:#0f172a;border:2px solid {color};border-radius:10px;
+                    padding:16px 20px;flex:1;min-width:200px;">
+          <div style="color:{color};font-size:0.78em;text-transform:uppercase;
+                      letter-spacing:0.08em;margin-bottom:8px;font-weight:700;">{label}</div>
+          <div style="color:#f8fafc;font-size:1.05em;font-weight:700;">
+            Peak disp: {peak_disp:.2f} px</div>
+          <div style="color:#94a3b8;font-size:0.85em;margin-top:4px;">
+            Mean disp: {mean_disp:.2f} px</div>
+          <div style="color:#f8fafc;font-size:0.9em;margin-top:8px;">
+            Peak |rot|: {peak_rot:.3f}°</div>
+          <div style="color:#94a3b8;font-size:0.85em;margin-top:2px;">
+            Mean |rot|: {mean_rot:.3f}°</div>
+        </div>"""
+
+        overview_tag = ""
+        channel_cards = ""
+        for path in plot_paths:
+            fname = os.path.basename(path)
+            if fname == "comparison_overview.png":
+                overview_tag = _img_tag(path)
+                continue
+            tag = _img_tag(path)
+            if not tag:
+                continue
+            gtitle = _graph_titles.get(
+                fname, fname.replace("_", " ").replace(".png", "").title()
+            )
+            channel_cards += f"""
+        <div style="background:#0f172a;border:1px solid #334155;border-radius:10px;
+                    padding:14px;margin-bottom:8px;">
+          <div style="color:#94a3b8;font-size:0.78em;text-transform:uppercase;
+                      letter-spacing:0.07em;margin-bottom:10px;">{gtitle}</div>
+          {tag}
+        </div>"""
+
+        overview_section = (
+            f"""<div style="background:#0f172a;border:1px solid #334155;border-radius:10px;
+                           padding:16px;margin-bottom:16px;">{overview_tag}</div>"""
+            if overview_tag else ""
+        )
+
+        camera_sections_html += f"""
+    <section style="margin-bottom:48px;">
+      <h2 style="font-size:1.1em;font-weight:700;color:#38bdf8;letter-spacing:0.04em;
+                 text-transform:uppercase;margin-bottom:16px;padding-bottom:8px;
+                 border-bottom:1px solid #1e293b;">{camera_label}</h2>
+      <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:20px;">
+        {stats_html}
+      </div>
+      {overview_section}
+      {channel_cards}
+    </section>"""
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{title}</title>
+  <style>
+    *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
+    body {{
+      font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
+      background: #020817;
+      color: #e2e8f0;
+      min-height: 100vh;
+    }}
+    .topbar {{
+      background: #0f172a;
+      border-bottom: 1px solid #1e293b;
+      padding: 18px 40px;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      position: sticky;
+      top: 0;
+      z-index: 10;
+    }}
+    .topbar-dot {{
+      width: 10px; height: 10px; border-radius: 50%;
+      background: linear-gradient(135deg, #38bdf8, #818cf8);
+      flex-shrink: 0;
+    }}
+    .topbar h1 {{
+      font-size: 1.05em; font-weight: 700; color: #f8fafc; letter-spacing: 0.02em;
+    }}
+    .container {{
+      max-width: 1100px; margin: 0 auto; padding: 40px 24px 64px;
+    }}
+    img {{ border-radius: 8px; }}
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <div class="topbar-dot"></div>
+    <h1>{title}</h1>
+  </div>
+  <div class="container">
+    {camera_sections_html}
+  </div>
+</body>
+</html>"""
+
+    with open(output_path, "w", encoding="utf-8") as fh:
+        fh.write(html)
+
+    if open_browser:
+        import shutil
+        win_downloads = _win_downloads()
+        if win_downloads:
+            dest = os.path.join(win_downloads, os.path.basename(output_path))
+            shutil.copy2(output_path, dest)
+            try:
+                win_path = subprocess.check_output(
+                    ["wslpath", "-w", dest], text=True
+                ).strip()
+                subprocess.Popen(
+                    ["cmd.exe", "/c", "start", "", win_path],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
+            except Exception:
+                pass
+        else:
+            webbrowser.open(f"file://{os.path.abspath(output_path)}")
+
+    return output_path
 
 
 def summarize(results: List[FrameResult]) -> dict:
@@ -202,6 +922,7 @@ def summarize(results: List[FrameResult]) -> dict:
     max_r = max(results, key=lambda r: r.total_displacement_pixels)
     lost = sum(1 for r in results if r.tracking_status == TrackingStatus.LOST)
     low = sum(1 for r in results if r.tracking_status == TrackingStatus.LOW_CONFIDENCE)
+    abs_rots = [abs(r.rotation_degrees) for r in results if r.tracking_status != TrackingStatus.LOST]
     return {
         "frames": len(results),
         "ok_frames": len(ok),
@@ -211,6 +932,8 @@ def summarize(results: List[FrameResult]) -> dict:
         "max_total_at_frame": max_r.frame_number,
         "max_total_at_timestamp": max_r.timestamp_seconds,
         "mean_total_displacement_px": (sum(totals) / len(totals)) if totals else 0.0,
+        "peak_abs_rotation_degrees": max(abs_rots) if abs_rots else 0.0,
+        "mean_abs_rotation_degrees": (sum(abs_rots) / len(abs_rots)) if abs_rots else 0.0,
     }
 
 
@@ -269,6 +992,7 @@ def generate_html_report(
     output_path: str,
     video_name: str = "",
     open_browser: bool = True,
+    combined_dir: Optional[str] = None,
 ) -> str:
     """Write a self-contained HTML summary report and optionally open it.
 
@@ -283,6 +1007,10 @@ def generate_html_report(
         Source video filename shown in the report header.
     open_browser:
         If ``True``, open the report in the default browser after writing.
+    combined_dir:
+        If provided, a "Combined View" section is prepended to the report
+        showing overlaid graphs from ``combined_overview.png`` and the
+        ``combined_*.png`` files in this directory.
     """
 
     def _img_tag(png_path: str) -> str:
@@ -318,6 +1046,55 @@ def generate_html_report(
         </div>"""
 
     camera_blocks = []
+
+    # Optional combined-view section (shown above per-camera sections).
+    combined_block = ""
+    if combined_dir is not None:
+        abs_combined = os.path.abspath(combined_dir)
+        combined_overview_tag = _img_tag(os.path.join(abs_combined, "combined_overview.png"))
+        combined_individual_cards = ""
+        combined_graph_specs = [
+            ("combined_total_displacement_vs_time.png", "Total Displacement  √(Δx²+Δy²)"),
+            ("combined_displacement_x_vs_time.png",     "Horizontal Displacement  Δx"),
+            ("combined_displacement_y_vs_time.png",     "Vertical Displacement  Δy"),
+            ("combined_rotation_vs_time.png",            "In-Plane Camera Rotation"),
+            ("combined_confidence_vs_time.png",          "Confidence"),
+        ]
+        for fname, gtitle in combined_graph_specs:
+            tag = _img_tag(os.path.join(abs_combined, fname))
+            if tag:
+                combined_individual_cards += f"""
+                <div style="background:#0f172a;border:1px solid #334155;border-radius:10px;
+                            padding:14px;margin-bottom:4px;">
+                  <div style="color:#94a3b8;font-size:0.78em;text-transform:uppercase;
+                              letter-spacing:0.07em;margin-bottom:10px;">{gtitle}</div>
+                  {tag}
+                </div>"""
+
+        if combined_overview_tag or combined_individual_cards:
+            combined_block = f"""
+        <section style="background:#1e293b;border:2px solid #38bdf8;border-radius:14px;
+                        padding:28px 32px;margin-bottom:32px;">
+          <h2 style="margin:0 0 22px;color:#f8fafc;font-size:1.2em;font-weight:700;
+                     letter-spacing:0.04em;display:flex;align-items:center;gap:10px;">
+            <span style="display:inline-block;width:8px;height:8px;border-radius:50%;
+                         background:linear-gradient(135deg,#38bdf8,#818cf8);"></span>
+            All Cameras — Combined View
+          </h2>
+          <div style="margin-top:0;">
+            <h3 style="color:#94a3b8;font-size:0.82em;text-transform:uppercase;
+                       letter-spacing:0.1em;margin:0 0 16px;">Overview Dashboard</h3>
+            <div style="background:#0f172a;border:1px solid #334155;border-radius:10px;padding:16px;">
+              {combined_overview_tag}
+            </div>
+          </div>
+          <div style="margin-top:24px;">
+            <h3 style="color:#94a3b8;font-size:0.82em;text-transform:uppercase;
+                       letter-spacing:0.1em;margin:0 0 16px;">Individual Channels</h3>
+            {combined_individual_cards}
+          </div>
+        </section>"""
+
     for label, s, out_dir, _ in camera_results:
         peak_px  = s.get("max_total_displacement_px", 0.0)
         mean_px  = s.get("mean_total_displacement_px", 0.0)
@@ -467,7 +1244,7 @@ def generate_html_report(
     {"<span class='sub'>Source: <code>" + video_name + "</code></span>" if video_name else ""}
   </div>
   <div class="container">
-    {"".join(camera_blocks)}
+    {combined_block}{"".join(camera_blocks)}
   </div>
 </body>
 </html>"""
