@@ -402,6 +402,238 @@ def generate_combined_plots(
     return saved
 
 
+# ---------------------------------------------------------------------------
+# Overlay mode: several videos x several cameras on two graphs
+# ---------------------------------------------------------------------------
+
+# Camera identity is carried by hue, video identity by line style, so no series
+# is distinguished by colour alone.  These three hues pass the categorical
+# checks (lightness band, chroma floor, CVD separation, contrast) against the
+# white panel background; keep them in this order when adding a fourth.
+_OVERLAY_CAMERA_COLORS = [
+    "#0284c7",  # blue
+    "#ea580c",  # orange
+    "#7c3aed",  # violet
+    "#db2777",  # pink
+]
+_OVERLAY_VIDEO_STYLES = ["-", "--", "-.", ":"]
+
+
+def generate_overlay_plots(
+    series_data: List[Tuple[str, str, List[FrameResult]]],
+    out_dir: str,
+    calibration: Optional[Calibration] = None,
+) -> List[str]:
+    """Create exactly two graphs with every camera of every video overlaid.
+
+    Parameters
+    ----------
+    series_data:
+        List of ``(video_label, camera_label, results)`` triples.  Colour is
+        assigned per *camera_label* and line style per *video_label*, so the
+        same camera is directly comparable across videos.
+    out_dir:
+        Directory where the two PNG files are written.
+    calibration:
+        When calibrated, the displacement graph is plotted in millimetres.
+
+    Returns
+    -------
+    Paths of the two saved PNGs: total displacement, then rotation.
+    """
+    if not series_data:
+        return []
+    os.makedirs(out_dir, exist_ok=True)
+
+    # Stable colour/style assignment in first-seen order.
+    video_labels, camera_labels = [], []
+    for video_label, camera_label, _ in series_data:
+        if video_label not in video_labels:
+            video_labels.append(video_label)
+        if camera_label not in camera_labels:
+            camera_labels.append(camera_label)
+
+    in_mm = calibration is not None and calibration.is_calibrated
+    ppm = calibration.pixels_per_mm if in_mm else 1.0
+
+    plotted = []
+    for video_label, camera_label, results in series_data:
+        s = _series(results)
+        plotted.append((
+            video_label,
+            camera_label,
+            s,
+            _OVERLAY_CAMERA_COLORS[camera_labels.index(camera_label) % len(_OVERLAY_CAMERA_COLORS)],
+            _OVERLAY_VIDEO_STYLES[video_labels.index(video_label) % len(_OVERLAY_VIDEO_STYLES)],
+        ))
+
+    disp_unit = "mm" if in_mm else "px"
+    specs = [
+        ("total", "Total Displacement  √(Δx²+Δy²)", f"Displacement ({disp_unit})",
+         "total_displacement_all_cameras.png"),
+        ("rot", "In-Plane Camera Rotation", "Rotation (°)",
+         "rotation_all_cameras.png"),
+    ]
+
+    saved = []
+    for key, title, ylabel, fname in specs:
+        fig, ax = plt.subplots(figsize=(13, 5.5))
+        for video_label, camera_label, s, color, style in plotted:
+            values = s[key]
+            if key == "total" and in_mm:
+                values = [v / ppm for v in values]
+            ax.plot(s["t"], values, label=f"{video_label} · {camera_label}",
+                    color=color, linestyle=style, linewidth=2.0)
+
+        ax.set_xlabel("Time (s)", fontsize=10)
+        ax.set_ylabel(ylabel, fontsize=10)
+        ax.set_title(title, fontsize=13, fontweight="bold", pad=12)
+        # Anchored outside the axes so it can never sit on top of a series.
+        # One column per video keeps each recording's cameras grouped together
+        # (matplotlib fills legend columns top-to-bottom).
+        leg = ax.legend(frameon=True, fontsize=9, ncol=max(1, len(video_labels)),
+                        loc="upper left", bbox_to_anchor=(1.015, 1.0),
+                        borderaxespad=0.0)
+        leg.get_frame().set_facecolor(_PANEL_BG)
+        leg.get_frame().set_edgecolor(_GRID_COLOR)
+        for txt in leg.get_texts():
+            txt.set_color(_TEXT_COLOR)
+        _apply_dark_theme(fig, [ax])
+        fig.tight_layout(pad=1.8)
+        path = os.path.join(out_dir, fname)
+        fig.savefig(path, dpi=140, bbox_inches="tight", facecolor=fig.get_facecolor())
+        plt.close(fig)
+        saved.append(path)
+
+    return saved
+
+
+def generate_overlay_report(
+    stats: List[Tuple[str, str, dict]],
+    plot_paths: List[str],
+    output_path: str,
+    title: str = "Camera Displacement — All Videos",
+    open_browser: bool = True,
+) -> str:
+    """Write a self-contained HTML page holding the two overlay graphs.
+
+    Parameters
+    ----------
+    stats:
+        List of ``(video_label, camera_label, summary_dict)`` triples, where
+        *summary_dict* comes from :func:`summarize`.
+    plot_paths:
+        The PNGs returned by :func:`generate_overlay_plots`.
+    """
+
+    def _img_tag(png_path: str) -> str:
+        abs_png = os.path.abspath(png_path)
+        if not os.path.isfile(abs_png):
+            return ""
+        with open(abs_png, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode()
+        return (f'<img src="data:image/png;base64,{b64}" '
+                f'style="max-width:100%;border-radius:8px;display:block;">')
+
+    rows = ""
+    for video_label, camera_label, s in stats:
+        total = s.get("frames", 0)
+        ok = s.get("ok_frames", 0)
+        quality = int(100 * ok / total) if total else 0
+        rows += f"""
+      <tr>
+        <td style="padding:8px 14px;border-bottom:1px solid #1e293b;color:#f8fafc;">{video_label}</td>
+        <td style="padding:8px 14px;border-bottom:1px solid #1e293b;color:#7dd3fc;">{camera_label}</td>
+        <td style="padding:8px 14px;border-bottom:1px solid #1e293b;text-align:right;">{s.get('max_total_displacement_px', 0.0):.2f}</td>
+        <td style="padding:8px 14px;border-bottom:1px solid #1e293b;text-align:right;">{s.get('mean_total_displacement_px', 0.0):.2f}</td>
+        <td style="padding:8px 14px;border-bottom:1px solid #1e293b;text-align:right;">{s.get('peak_abs_rotation_degrees', 0.0):.3f}</td>
+        <td style="padding:8px 14px;border-bottom:1px solid #1e293b;text-align:right;">{s.get('mean_abs_rotation_degrees', 0.0):.3f}</td>
+        <td style="padding:8px 14px;border-bottom:1px solid #1e293b;text-align:right;">{quality}%</td>
+      </tr>"""
+
+    graph_cards = ""
+    for path in plot_paths:
+        tag = _img_tag(path)
+        if tag:
+            graph_cards += f"""
+    <div style="background:#0f172a;border:1px solid #334155;border-radius:10px;
+                padding:16px;margin-bottom:20px;">{tag}</div>"""
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{title}</title>
+  <style>
+    *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
+    body {{
+      font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
+      background: #020817; color: #e2e8f0; min-height: 100vh;
+    }}
+    .topbar {{
+      background: #0f172a; border-bottom: 1px solid #1e293b; padding: 18px 40px;
+      display: flex; align-items: center; gap: 14px; position: sticky; top: 0; z-index: 10;
+    }}
+    .topbar-dot {{
+      width: 10px; height: 10px; border-radius: 50%;
+      background: linear-gradient(135deg, #38bdf8, #818cf8); flex-shrink: 0;
+    }}
+    .topbar h1 {{ font-size: 1.05em; font-weight: 700; color: #f8fafc; letter-spacing: 0.02em; }}
+    .container {{ max-width: 1200px; margin: 0 auto; padding: 40px 24px 64px; }}
+    th {{
+      padding: 8px 14px; text-align: left; color: #64748b; font-size: 0.75em;
+      text-transform: uppercase; letter-spacing: 0.08em; border-bottom: 1px solid #334155;
+    }}
+    td {{ font-size: 0.9em; color: #cbd5e1; }}
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <div class="topbar-dot"></div>
+    <h1>{title}</h1>
+  </div>
+  <div class="container">
+    {graph_cards}
+    <div style="background:#0f172a;border:1px solid #334155;border-radius:10px;
+                padding:8px 4px;overflow-x:auto;">
+      <table style="width:100%;border-collapse:collapse;">
+        <thead><tr>
+          <th>Video</th><th>Camera</th>
+          <th style="text-align:right;">Peak disp (px)</th>
+          <th style="text-align:right;">Mean disp (px)</th>
+          <th style="text-align:right;">Peak |rot| (°)</th>
+          <th style="text-align:right;">Mean |rot| (°)</th>
+          <th style="text-align:right;">Quality</th>
+        </tr></thead>
+        <tbody>{rows}</tbody>
+      </table>
+    </div>
+  </div>
+</body>
+</html>"""
+
+    with open(output_path, "w", encoding="utf-8") as fh:
+        fh.write(html)
+
+    if open_browser:
+        import shutil
+        win_downloads = _win_downloads()
+        if win_downloads:
+            dest = os.path.join(win_downloads, os.path.basename(output_path))
+            shutil.copy2(output_path, dest)
+            try:
+                win_path = subprocess.check_output(["wslpath", "-w", dest], text=True).strip()
+                subprocess.Popen(["cmd.exe", "/c", "start", "", win_path],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception:
+                pass
+        else:
+            webbrowser.open(f"file://{os.path.abspath(output_path)}")
+
+    return output_path
+
+
 def load_csv_series(csv_path: str) -> dict:
     """Read a displacement CSV and return a plot-ready series dict.
 

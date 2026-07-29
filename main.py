@@ -47,6 +47,8 @@ from camera_displacement.reporting import (
     generate_comparison_plots,
     generate_comparison_report,
     generate_multi_camera_comparison_report,
+    generate_overlay_plots,
+    generate_overlay_report,
 )
 
 console = Console()
@@ -66,6 +68,18 @@ def parse_args(argv=None) -> argparse.Namespace:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument("--video", help="Path to the input video file.")
+    p.add_argument(
+        "--videos", nargs="+", metavar="VIDEO",
+        help=(
+            "Two or more videos to analyze and overlay on a single pair of "
+            "graphs (total displacement + in-plane rotation). Requires "
+            "--layout. Every camera of every video is drawn on both graphs."
+        ),
+    )
+    p.add_argument(
+        "--video-labels", nargs="+", metavar="LABEL",
+        help="Legend labels for each --videos entry (defaults to the filenames).",
+    )
     p.add_argument("--output", default="output", help="Output folder.")
     p.add_argument(
         "--roi", nargs=4, type=int, metavar=("X", "Y", "W", "H"),
@@ -300,10 +314,14 @@ def _select_roi_with_retry(
             return roi  # proceed anyway at user's request
 
 
-def _prompt_mm_conversion(outputs_list, calibration) -> None:
-    """Ask the user for a pixels-per-mm scale and add mm columns to all CSVs."""
+def _prompt_mm_conversion(outputs_list, calibration) -> Optional[float]:
+    """Ask the user for a pixels-per-mm scale and add mm columns to all CSVs.
+
+    Returns the pixels-per-mm value that was applied, or ``None`` when the
+    conversion was skipped (or the run was already calibrated).
+    """
     if calibration.is_calibrated:
-        return
+        return None
 
     console.print("\n[bold]Convert results to millimetres?[/bold]")
     console.print("  Enter the number of pixels that equal [cyan]1 mm[/cyan] in your video,")
@@ -311,14 +329,14 @@ def _prompt_mm_conversion(outputs_list, calibration) -> None:
     raw = input("  Pixels per mm: ").strip()
     if not raw:
         console.print("  [dim]Skipping mm conversion.[/dim]")
-        return
+        return None
     try:
         ppm = float(raw)
         if ppm <= 0:
             raise ValueError
     except ValueError:
         console.print("  [red]Invalid value — skipping mm conversion.[/red]")
-        return
+        return None
 
     console.print(f"\n  Converting at [cyan]{ppm}[/cyan] px/mm …")
     for label, outputs, _ in outputs_list:
@@ -332,6 +350,7 @@ def _prompt_mm_conversion(outputs_list, calibration) -> None:
         console.print(f"  [bold]{label}[/bold]  "
                       f"Peak = [bold white]{peak_mm:.3f} mm[/bold white]   "
                       f"Mean = [bold white]{mean_mm:.3f} mm[/bold white]")
+    return ppm
 
 
 def _build_excluded_series(args) -> set:
@@ -457,6 +476,10 @@ def main(argv=None) -> int:
     if getattr(args, "compare", None):
         return _run_compare(args)
 
+    # Overlay mode: analyze several videos and draw every camera on two graphs.
+    if getattr(args, "videos", None):
+        return _run_multi_video(args)
+
     # 1. Video selection.
     video_path = args.video
     if not video_path:
@@ -581,6 +604,173 @@ def main(argv=None) -> int:
     console.print(Panel(out_table,
                         title=f"[bold]Output files → {os.path.abspath(output_dir)}[/bold]",
                         border_style="green", padding=(1, 2)))
+    return 0
+
+
+def _slugify(label: str) -> str:
+    """Turn a display label into a filesystem-safe folder name."""
+    safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in label)
+    return safe.strip("_") or "video"
+
+
+def _run_multi_video(args) -> int:
+    """Analyze several videos and overlay every camera on one pair of graphs."""
+    video_paths = args.videos
+    labels = list(args.video_labels or [])
+    while len(labels) < len(video_paths):
+        labels.append(os.path.splitext(os.path.basename(video_paths[len(labels)]))[0])
+
+    if not args.layout:
+        print("Error: --videos requires --layout (e.g. --layout 3x1).", file=sys.stderr)
+        return 2
+    if args.roi:
+        console.print("[yellow]Note: --roi is ignored in multi-video mode.[/yellow]")
+
+    output_root = args.output
+    # Collected across every video: (video_label, camera_label, results/summary).
+    plot_data = []
+    stats = []
+    all_outputs = []
+    last_calibration = Calibration.none()
+
+    for video_path, video_label in zip(video_paths, labels):
+        console.rule(f"[bold magenta]{video_label}[/bold magenta]  [dim]{video_path}[/dim]")
+
+        try:
+            loader = VideoLoader(video_path)
+        except VideoError as exc:
+            console.print(f"  [red]Skipping — {exc}[/red]")
+            continue
+
+        info = loader.info
+        console.print(f"  [dim]{info.width}x{info.height} @ {info.fps:.2f} fps, "
+                      f"~{info.frame_count} frames, {info.duration_seconds:.1f}s[/dim]")
+
+        baseline_index = args.baseline_frame
+        baseline = loader.read_frame(baseline_index)
+        loader.release()
+        if baseline is None:
+            console.print(f"  [red]Could not read baseline frame {baseline_index}; skipping.[/red]")
+            continue
+
+        try:
+            regions = parse_layout(args.layout, info.width, info.height, args.num_cameras)
+        except ValueError as exc:
+            console.print(f"  [red]{exc}[/red]")
+            return 2
+
+        calibration = build_calibration(args, baseline)
+        console.print(f"  [dim]Calibration: {calibration.describe()}[/dim]")
+
+        video_dir = os.path.join(output_root, _slugify(video_label))
+
+        for region in regions:
+            cam_label = f"camera_{region.camera_id}"
+            console.print(f"\n[bold cyan]{video_label} / {cam_label}[/bold cyan] "
+                          f"[dim](crop x={region.x} y={region.y} "
+                          f"w={region.width} h={region.height})[/dim]")
+
+            sub_baseline = region.crop(baseline)
+            print(f"Select the stationary reference object for "
+                  f"{video_label}/{cam_label} in the window that opens...")
+            roi = _select_roi_with_retry(
+                sub_baseline,
+                window_title=f"[{video_label} / {cam_label}] Select reference object",
+                detector=args.detector,
+                min_features=args.min_inliers,
+            )
+            if roi is None:
+                console.print(f"  [yellow]No ROI selected; skipping {cam_label}.[/yellow]")
+                continue
+            roi = validate_roi(roi, sub_baseline.shape)
+            print(f"  ROI = {roi}")
+
+            cam_output_dir = os.path.join(video_dir, cam_label)
+            config = AnalyzerConfig(
+                video_path=video_path,
+                roi=roi,
+                output_dir=cam_output_dir,
+                baseline_frame_index=baseline_index,
+                detector=args.detector,
+                max_features=args.max_features,
+                min_inliers=args.min_inliers,
+                min_inlier_ratio=args.min_inlier_ratio,
+                calibration=calibration,
+                write_annotated_video=not args.no_video,
+                # Only the two overlay graphs are wanted — skip per-camera PNGs.
+                write_graphs=False,
+                progress=progress_bar,
+                camera_region=region.as_xywh(),
+            )
+
+            console.print(f"  [bold]Analyzing {video_label}/{cam_label}...[/bold]")
+            try:
+                outputs = DisplacementAnalyzer(config).run()
+            except (ValueError, RuntimeError) as exc:
+                console.print(f"  [red]Error analyzing {cam_label}: {exc}[/red]")
+                continue
+
+            _print_summary(outputs, calibration, label=f"{video_label} / {cam_label}")
+            plot_data.append((video_label, cam_label, outputs.absolute_results))
+            stats.append((video_label, cam_label, outputs.absolute_summary))
+            all_outputs.append((f"{video_label}/{cam_label}", outputs, cam_output_dir))
+            last_calibration = calibration
+
+    if not plot_data:
+        console.print("\n[red]No cameras were successfully analyzed.[/red]")
+        return 1
+
+    # A scale entered at the prompt also switches the graphs over to millimetres.
+    entered_ppm = _prompt_mm_conversion(all_outputs, last_calibration)
+    if entered_ppm:
+        last_calibration = Calibration.from_ppm(entered_ppm)
+
+    console.print("\n[bold]Generating overlay graphs…[/bold]")
+    os.makedirs(output_root, exist_ok=True)
+    plots = generate_overlay_plots(plot_data, output_root, calibration=last_calibration)
+
+    report_path = os.path.join(output_root, "report.html")
+    generate_overlay_report(
+        stats, plots, report_path,
+        title="Camera Displacement — " + " vs ".join(labels),
+        open_browser=False,
+    )
+
+    out_table = Table(box=rich_box.SIMPLE, show_header=True, padding=(0, 2))
+    out_table.add_column("Video", style="bold magenta", no_wrap=True)
+    out_table.add_column("Camera", style="bold cyan", no_wrap=True)
+    out_table.add_column("Peak (px)", justify="right")
+    out_table.add_column("Mean (px)", justify="right")
+    out_table.add_column("Peak |rot| (°)", justify="right")
+    out_table.add_column("Mean |rot| (°)", justify="right")
+    out_table.add_column("Quality", justify="right")
+
+    for video_label, cam_label, s in stats:
+        total = s.get("frames", 0)
+        ok = s.get("ok_frames", 0)
+        quality_pct = int(100 * ok / total) if total else 0
+        qcolor = "green" if quality_pct >= 80 else "yellow" if quality_pct >= 50 else "red"
+        out_table.add_row(
+            video_label,
+            cam_label,
+            f"{s.get('max_total_displacement_px', 0.0):.2f}",
+            f"{s.get('mean_total_displacement_px', 0.0):.2f}",
+            f"{s.get('peak_abs_rotation_degrees', 0.0):.3f}",
+            f"{s.get('mean_abs_rotation_degrees', 0.0):.3f}",
+            f"[{qcolor}]{quality_pct}%[/{qcolor}]",
+        )
+
+    console.print(Panel(
+        out_table,
+        title=f"[bold]Done — {len(plot_data)} camera feed(s) across "
+              f"{len(labels)} video(s)[/bold]",
+        border_style="green", padding=(1, 2),
+    ))
+    for path in plots:
+        console.print(f"  [green]✓[/green] [cyan]{os.path.abspath(path)}[/cyan]")
+    console.print(f"[bold green]HTML report:[/bold green] {os.path.abspath(report_path)}")
+
+    _open_plots_in_windows(plots)
     return 0
 
 
