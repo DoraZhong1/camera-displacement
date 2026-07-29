@@ -20,10 +20,13 @@ import os
 import sys
 
 # Suppress Qt font/platform noise before any GUI library is imported.
-os.environ.setdefault("QT_LOGGING_RULES", "*.debug=false;qt.qpa.*=false")
-os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
-os.environ.setdefault("QT_QPA_FONTDIR", "/usr/share/fonts/truetype/dejavu")
-os.environ.setdefault("FONTCONFIG_PATH", "/etc/fonts")
+# These paths are Linux/WSL-specific; on macOS OpenCV uses the Cocoa backend
+# and forcing an xcb platform plugin would break the ROI selector window.
+if sys.platform.startswith("linux"):
+    os.environ.setdefault("QT_LOGGING_RULES", "*.debug=false;qt.qpa.*=false")
+    os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
+    os.environ.setdefault("QT_QPA_FONTDIR", "/usr/share/fonts/truetype/dejavu")
+    os.environ.setdefault("FONTCONFIG_PATH", "/etc/fonts")
 # Silence noisy fontconfig / Pango warnings from OpenCV on WSL.
 os.environ.setdefault("OPENCV_LOG_LEVEL", "ERROR")
 
@@ -273,19 +276,24 @@ def _print_summary(outputs, calibration, label: str = "") -> None:
 
 
 def _open_plots_in_windows(png_paths: list) -> None:
-    """Open each PNG in the list with the Windows default image viewer."""
+    """Open each PNG with the platform's default image viewer."""
     import subprocess
     if not png_paths:
         return
     for path in png_paths:
+        abs_path = os.path.abspath(path)
         try:
-            win_path = subprocess.check_output(
-                ["wslpath", "-w", os.path.abspath(path)], text=True
-            ).strip()
-            subprocess.Popen(
-                ["explorer.exe", win_path],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            )
+            if sys.platform == "darwin":
+                cmd = ["open", abs_path]
+            elif sys.platform.startswith("win"):
+                cmd = ["cmd.exe", "/c", "start", "", abs_path]
+            else:
+                # WSL: hand the Windows-side path to Explorer.
+                win_path = subprocess.check_output(
+                    ["wslpath", "-w", abs_path], text=True
+                ).strip()
+                cmd = ["explorer.exe", win_path]
+            subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except Exception:
             pass
 
