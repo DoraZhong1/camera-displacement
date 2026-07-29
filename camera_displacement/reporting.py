@@ -406,17 +406,25 @@ def generate_combined_plots(
 # Overlay mode: several videos x several cameras on two graphs
 # ---------------------------------------------------------------------------
 
-# Camera identity is carried by hue, video identity by line style, so no series
-# is distinguished by colour alone.  These three hues pass the categorical
+# Video identity is carried by hue, camera identity by line weight/dash, so no
+# series is distinguished by colour alone.  These hues pass the categorical
 # checks (lightness band, chroma floor, CVD separation, contrast) against the
 # white panel background; keep them in this order when adding a fourth.
-_OVERLAY_CAMERA_COLORS = [
+_OVERLAY_VIDEO_COLORS = [
     "#0284c7",  # blue
     "#ea580c",  # orange
     "#7c3aed",  # violet
     "#db2777",  # pink
 ]
-_OVERLAY_VIDEO_STYLES = ["-", "--", "-.", ":"]
+# (linestyle, linewidth) per camera: bold solid, regular solid, then dotted.
+# The dotted entry is drawn slightly heavier than the regular line so its dashes
+# stay legible at 140 dpi.
+_OVERLAY_CAMERA_STYLES = [
+    ("-", 3.0),
+    ("-", 1.4),
+    (":", 2.0),
+    ("-.", 1.8),
+]
 
 
 def generate_overlay_plots(
@@ -430,8 +438,9 @@ def generate_overlay_plots(
     ----------
     series_data:
         List of ``(video_label, camera_label, results)`` triples.  Colour is
-        assigned per *camera_label* and line style per *video_label*, so the
-        same camera is directly comparable across videos.
+        assigned per *video_label* and line weight/dash per *camera_label*, so
+        each recording reads as one colour block and the same camera is
+        directly comparable across videos by its line style.
     out_dir:
         Directory where the two PNG files are written.
     calibration:
@@ -459,12 +468,16 @@ def generate_overlay_plots(
     plotted = []
     for video_label, camera_label, results in series_data:
         s = _series(results)
+        style, width = _OVERLAY_CAMERA_STYLES[
+            camera_labels.index(camera_label) % len(_OVERLAY_CAMERA_STYLES)
+        ]
         plotted.append((
             video_label,
             camera_label,
             s,
-            _OVERLAY_CAMERA_COLORS[camera_labels.index(camera_label) % len(_OVERLAY_CAMERA_COLORS)],
-            _OVERLAY_VIDEO_STYLES[video_labels.index(video_label) % len(_OVERLAY_VIDEO_STYLES)],
+            _OVERLAY_VIDEO_COLORS[video_labels.index(video_label) % len(_OVERLAY_VIDEO_COLORS)],
+            style,
+            width,
         ))
 
     disp_unit = "mm" if in_mm else "px"
@@ -478,12 +491,12 @@ def generate_overlay_plots(
     saved = []
     for key, title, ylabel, fname in specs:
         fig, ax = plt.subplots(figsize=(13, 5.5))
-        for video_label, camera_label, s, color, style in plotted:
+        for video_label, camera_label, s, color, style, width in plotted:
             values = s[key]
             if key == "total" and in_mm:
                 values = [v / ppm for v in values]
             ax.plot(s["t"], values, label=f"{video_label} · {camera_label}",
-                    color=color, linestyle=style, linewidth=2.0)
+                    color=color, linestyle=style, linewidth=width)
 
         ax.set_xlabel("Time (s)", fontsize=10)
         ax.set_ylabel(ylabel, fontsize=10)
